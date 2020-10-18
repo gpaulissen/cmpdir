@@ -1,0 +1,198 @@
+#!/usr/bin/env perl
+
+=pod
+
+=head1 NAME
+
+cmpdir.pl - Compare the files in one or more directories (recursive). 
+
+=head1 SYNOPSIS
+
+  cmpdir.pl [OPTION...] DIRECTORY...
+
+=head1 DESCRIPTION
+
+First Use Case is to compare two iTunes Libraries.
+
+The idea is to display the following information:
+
+=over 4
+
+=item The file size
+
+Sorted descending.
+
+=item The equality group.
+
+Ascending. Every file in the same equality group is equal.
+
+=item The base name of each file.
+
+=item The full pathname of each file excluding the directory on the comand line.
+
+=item The original directory.
+
+=back
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--help>
+
+=back
+
+This help.
+
+=head1 NOTES
+
+=head1 EXAMPLES
+
+=head1 BUGS
+
+=head1 SEE ALSO
+
+=head1 AUTHOR
+
+Gert-Jan Paulissen, E<lt>gert.jan.paulissen@gmail.comE<gt>.
+
+=head1 VERSION
+
+=head1 HISTORY
+
+2020-10-18  G.J. Paulissen
+
+First version.
+
+=cut
+
+use 5.008; # Perl 5.8 should be OK
+
+# use autodie; # automatically die when a system call gives an error (for example open)
+use strict;
+use warnings;
+
+use Data::Dumper;
+
+use File::Spec;
+use File::Basename;
+use File::Find;
+use Getopt::Long;
+use Pod::Usage;
+
+use lib &dirname($0); # to find File::Copy::Recursive in this directory
+use MyFile;
+
+# VARIABLES
+
+my $program = &basename($0);
+my @files = ();
+
+# command line options
+
+my $verbose = 0;
+
+# PROTOTYPES
+
+sub main ();
+sub process_command_line ();
+sub process_file ($);
+sub process ();
+                                                         
+# MAIN
+
+main();
+
+# SUBROUTINES
+
+sub main () 
+{
+    process_command_line();
+    
+    foreach my $dir (@ARGV) {
+        # store the origin
+        my $origin = File::Spec->rel2abs($dir);
+        find(sub { process_file($origin); }, $origin);
+    }
+
+    process();
+}
+
+sub process_command_line ()
+{
+    # Windows FTYPE and ASSOC cause the command 'generate_ddl -h -c file'
+    # to have ARGV[0] == ' -h -c file' and number of arguments 1.
+    # Hence strip the spaces from $ARGV[0] and recreate @ARGV.
+    if ( @ARGV == 1 && $ARGV[0] =~ s/^\s+//o ) {
+        @ARGV = split( / /, $ARGV[0] );
+    }
+    
+    Getopt::Long::Configure(qw(require_order));
+
+    #
+    GetOptions('help' => sub { pod2usage(-verbose => 2) },
+               'verbose+' => \$verbose
+        )
+        or pod2usage(-verbose => 0);
+}
+
+sub process_file ($)
+{
+    my $origin = shift(@_);
+
+    # $File::Find::dir is the current directory name,
+    # $_ is the current filename within that directory
+    # $File::Find::name is the complete pathname to the file.
+
+    # Only process files
+    return unless -f $_ ;
+
+    my ($size, $blksize) = (stat($File::Find::name))[7, 11];
+    
+    my $file = MyFile->new(filename => $File::Find::name, size => $size, blksize => $blksize, origin => $origin);
+
+    push(@files, $file);
+}
+
+sub process ()
+{
+    for my $i (0 .. @files) {
+        my $file = $files[$i];
+
+        print "file $i: ", Dumper($file);
+        
+        # printf("filename: %s; size: %d; blksize: %s; origin: %s; basename: %s; dirname: %s", $file->filename, $file->size, $file->blksize, $file->origin, $file->basename, $file->dirname );
+    }
+}
+
+
+__DATA__
+
+stat($filename) returns:
+
+ 0 dev      device number of filesystem
+ 1 ino      inode number
+ 2 mode     file mode  (type and permissions)
+ 3 nlink    number of (hard) links to the file
+ 4 uid      numeric user ID of file's owner
+ 5 gid      numeric group ID of file's owner
+ 6 rdev     the device identifier (special files only)
+ 7 size     total size of file, in bytes
+ 8 atime    last access time in seconds since the epoch
+ 9 mtime    last modify time in seconds since the epoch
+10 ctime    inode change time in seconds since the epoch (*)
+11 blksize  preferred I/O size in bytes for interacting with the
+            file (may vary from file to file)
+12 blocks   actual number of system-specific blocks allocated
+            on disk (often, but not always, 512 bytes each)
+
+
+file object:
+
+size - returned by stat()
+blksize - returned by stat()
+directory - command line
+pathname
+basename
+
+
