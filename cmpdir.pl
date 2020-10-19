@@ -76,7 +76,7 @@ use Data::Dumper;
 
 use File::Spec;
 use File::Basename;
-use File::Find;
+use File::Find::Rule;
 use Getopt::Long;
 use Pod::Usage;
 
@@ -86,7 +86,7 @@ use MyFile;
 # VARIABLES
 
 my $program = &basename($0);
-my @files = ();
+my @files;
 
 # command line options
 
@@ -96,7 +96,6 @@ my $verbose = 0;
 
 sub main ();
 sub process_command_line ();
-sub process_file ($);
 sub process ();
                                                          
 # MAIN
@@ -108,11 +107,31 @@ main();
 sub main () 
 {
     process_command_line();
-    
+
+    my $rule = File::Find::Rule->new;
+
+    $rule->or( $rule->new
+               ->directory
+               # ignore hidden (Unix) directories
+               ->name('.?*')
+               ->prune
+               ->discard
+             , $rule->new
+               ->file
+               # ignore hidden (Unix) files
+               ->not_name('.?*'));
+
     foreach my $dir (@ARGV) {
         # store the origin
         my $origin = File::Spec->rel2abs($dir);
-        find(sub { process_file($origin); }, $origin);
+
+        foreach my $filename ($rule->in($origin)) {
+            my ($size, $blksize) = (stat($filename))[7, 11];
+
+            $blksize = 512 unless defined($blksize) && $blksize ne "";    
+
+            push(@files, MyFile->new(filename => $filename, size => $size, blksize => $blksize, origin => $origin));
+        }
     }
 
     process();
@@ -136,32 +155,14 @@ sub process_command_line ()
         or pod2usage(-verbose => 0);
 }
 
-sub process_file ($)
-{
-    my $origin = shift(@_);
-
-    # $File::Find::dir is the current directory name,
-    # $_ is the current filename within that directory
-    # $File::Find::name is the complete pathname to the file.
-
-    # Only process files
-    return unless -f $_ ;
-
-    my ($size, $blksize) = (stat($File::Find::name))[7, 11];
-    
-    my $file = MyFile->new(filename => $File::Find::name, size => $size, blksize => $blksize, origin => $origin);
-
-    push(@files, $file);
-}
-
 sub process ()
 {
-    for my $i (0 .. @files) {
-        my $file = $files[$i];
+    my $prev_file = undef;
+    
+    foreach my $file (reverse sort { $a->compare($b) } @files) {
+        printf("filename: %s; size: %d; blksize: %s; crc32: %d; origin: %s; compare previous: %s\n", $file->filename, $file->size, $file->blksize, $file->crc32, $file->origin, (defined $prev_file ? $file->compare($prev_file) : '') );
 
-        print "file $i: ", Dumper($file);
-        
-        # printf("filename: %s; size: %d; blksize: %s; origin: %s; basename: %s; dirname: %s", $file->filename, $file->size, $file->blksize, $file->origin, $file->basename, $file->dirname );
+        $prev_file = $file;
     }
 }
 
