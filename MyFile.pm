@@ -16,7 +16,7 @@ has 'origin' => ( is => 'ro', isa => 'Str', required => 1 );
 
 has 'crc32' => ( is => 'rw', isa => 'Int', required => 0 );
 
-my %compare_results;
+my %compare_results; # cache cmp() results
 
 sub basename {
     my $self = shift;
@@ -30,7 +30,7 @@ sub dirname {
     return (fileparse($self->filename))[1];
 }
 
-sub compare {
+sub cmp {
     my $self = shift;
     my $file = shift;
 
@@ -38,6 +38,8 @@ sub compare {
 
     if (exists($compare_results{$self}{$file})) {
         $retval = $compare_results{$self}{$file};
+    } elsif (exists($compare_results{$file}{$self})) {
+        $retval = -1 * $compare_results{$file}{$self};
     } else {
         $retval = ($self->size <=> $file->size);
 

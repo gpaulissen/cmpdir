@@ -26,11 +26,9 @@ Sorted descending.
 
 Ascending. Every file in the same equality group is equal.
 
-=item The base name of each file.
+=item The original directory.
 
 =item The full pathname of each file excluding the directory on the comand line.
-
-=item The original directory.
 
 =back
 
@@ -86,11 +84,28 @@ use MyFile;
 # VARIABLES
 
 my $program = &basename($0);
-my @files;
+my %dirs;
+my %files;
 
 # command line options
 
 my $verbose = 0;
+
+# FORMATS
+
+my ($eq, $size, $origin, $filename);
+
+format FILE_TOP =
+
+Eq           Size  Origin  Filename
+--  -------------  ------  ---------------------------------------------------------------------------------------------------------
+.
+
+format FILE =
+@<  @>>>>>>>>>>>>  @>>>>>  @*
+$eq, $size, $origin, $filename
+.
+
 
 # PROTOTYPES
 
@@ -125,12 +140,17 @@ sub main ()
         # store the origin
         my $origin = File::Spec->rel2abs($dir);
 
+        if (!exists($dirs{$origin})) {
+            $dirs{$origin} = (keys %dirs) + 1;
+        }            
+
         foreach my $filename ($rule->in($origin)) {
             my ($size, $blksize) = (stat($filename))[7, 11];
 
             $blksize = 512 unless defined($blksize) && $blksize ne "";    
 
-            push(@files, MyFile->new(filename => $filename, size => $size, blksize => $blksize, origin => $origin));
+            $files{$filename} = MyFile->new(filename => $filename, size => $size, blksize => $blksize, origin => $origin)
+                unless exists $files{$filename};
         }
     }
 
@@ -158,10 +178,22 @@ sub process_command_line ()
 sub process ()
 {
     my $prev_file = undef;
-    
-    foreach my $file (reverse sort { $a->compare($b) } @files) {
-        printf("filename: %s; size: %d; blksize: %s; crc32: %d; origin: %s; compare previous: %s\n", $file->filename, $file->size, $file->blksize, $file->crc32, $file->origin, (defined $prev_file ? $file->compare($prev_file) : '') );
 
+    select(STDOUT);
+    $^ = "FILE_TOP";
+    $~ = "FILE";
+    # just print one page by setting page length large enough
+    $= = (keys %files) + 2;
+    
+    foreach my $file (reverse sort { $a->cmp($b) } values %files) {
+        ($size, $origin, $filename) = ($file->size, $dirs{$file->origin}, $file->filename);
+
+        my $cmp = (defined $prev_file ? $file->cmp($prev_file) : -1);
+        
+        $eq = ($cmp != 0 ? "" : "=");
+        
+        write;
+        
         $prev_file = $file;
     }
 }
