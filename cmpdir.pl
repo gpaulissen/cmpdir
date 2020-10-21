@@ -14,21 +14,25 @@ cmpdir.pl - Compare the files in one or more directories (recursive).
 
 First Use Case is to compare two iTunes Libraries.
 
-The idea is to display the following information:
+The idea is to display the following report:
 
 =over 4
 
-=item The file size
+=item Is the file equal to the previous one displayed?
+
+Indicated by two equal signs (==).
+
+=item The file size.
 
 Sorted descending.
 
-=item The equality group.
+=item The last file modify time.
 
-Ascending. Every file in the same equality group is equal.
+=item The (number of the) original directory.
 
-=item The original directory.
+The number of the directory in the command line DIRECTORY...
 
-=item The full pathname of each file excluding the directory on the comand line.
+=item The full pathname of each file.
 
 =back
 
@@ -44,11 +48,35 @@ This help.
 
 =head1 NOTES
 
+The comparison between two files is made by:
+
+=over 4
+
+=item File size
+
+  file1 size <=> file2 size
+
+=item crc32
+
+If the file sizes are equal, the first 512 bytes of each files are read and the crc32 is calculated.
+
+  file1 crc32 <=> file2 crc32
+
+=item File::Compare::compare
+
+If the file sizes and crc32s are equal:
+
+  File::Compare::compare(file1, file2)
+
+=back
+
 =head1 EXAMPLES
 
 =head1 BUGS
 
 =head1 SEE ALSO
+
+The crc32 algorithm is from L<http://billauer.co.il/blog/2011/05/perl-crc32-crc-xs-module/>.
 
 =head1 AUTHOR
 
@@ -72,11 +100,13 @@ use warnings;
 
 use Data::Dumper;
 
+use English;
 use File::Spec;
 use File::Basename;
 use File::Find::Rule;
 use Getopt::Long;
 use Pod::Usage;
+use POSIX qw(strftime);
 
 use lib &dirname($0); # to find File::Copy::Recursive in this directory
 use MyFile;
@@ -93,17 +123,26 @@ my $verbose = 0;
 
 # FORMATS
 
-my ($eq, $size, $origin, $filename);
+my ($nr, $origin, $eq, $size, $mtime, $filename);
+
+format ORIGIN_TOP =
+Nr  Origin
+--  ------
+.
+
+format ORIGIN =
+@<  @*
+$nr, $origin
+.
 
 format FILE_TOP =
-
-Eq           Size  Origin  Filename
---  -------------  ------  ---------------------------------------------------------------------------------------------------------
+Eq           Size  Origin  Modification time    Filename
+--           ----  ------  -----------------    --------
 .
 
 format FILE =
-@<  @>>>>>>>>>>>>  @>>>>>  @*
-$eq, $size, $origin, $filename
+@<  @>>>>>>>>>>>>  @>>>>>  @<<<<<<<<<<<<<<<<<<  @*
+$eq, $size, $origin, $mtime, $filename
 .
 
 
@@ -145,11 +184,11 @@ sub main ()
         }            
 
         foreach my $filename ($rule->in($origin)) {
-            my ($size, $blksize) = (stat($filename))[7, 11];
+            my ($size, $mtime, $blksize) = (stat($filename))[7, 9, 11];
 
             $blksize = 512 unless defined($blksize) && $blksize ne "";    
 
-            $files{$filename} = MyFile->new(filename => $filename, size => $size, blksize => $blksize, origin => $origin)
+            $files{$filename} = MyFile->new(filename => $filename, size => $size, mtime => $mtime, blksize => $blksize, origin => $origin)
                 unless exists $files{$filename};
         }
     }
@@ -173,29 +212,61 @@ sub process_command_line ()
                'verbose+' => \$verbose
         )
         or pod2usage(-verbose => 0);
+
+    pod2usage(-message => "$0: Must supply at least one directory. Run with --help option.\n")
+        unless @ARGV >= 1;
+
+    foreach my $dir (@ARGV) {
+        pod2usage(-message => "$0: $dir is not a directory. Run with --help option.\n")
+            unless -d $dir;
+    }
 }
 
 sub process ()
 {
+    my $ofh;
+
+    print "\n";
+
+    $FORMAT_FORMFEED = "";
+    $FORMAT_LINES_LEFT = 0;
+
+    $ofh = select(STDOUT);
+    $^ = "ORIGIN_TOP";
+    $~ = "ORIGIN";
+    
+    foreach my $dir (sort { $dirs{$a} <=> $dirs{$b} } keys %dirs) {
+        ($nr, $origin) = ($dirs{$dir}, $dir);
+            
+        write;
+    }
+    
+    select($ofh);
+
+    print "\n";
+    
     my $prev_file = undef;
 
-    select(STDOUT);
+    $FORMAT_LINES_LEFT = 0;
+
+    $ofh = select(STDOUT);
     $^ = "FILE_TOP";
     $~ = "FILE";
     # just print one page by setting page length large enough
     $= = (keys %files) + 2;
     
     foreach my $file (reverse sort { $a->cmp($b) } values %files) {
-        ($size, $origin, $filename) = ($file->size, $dirs{$file->origin}, $file->filename);
+        ($size, $origin, $filename, $mtime) = ($file->size, $dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
 
         my $cmp = (defined $prev_file ? $file->cmp($prev_file) : -1);
         
-        $eq = ($cmp != 0 ? "" : "=");
+        $eq = ($cmp != 0 ? '' : '==');
         
         write;
         
         $prev_file = $file;
     }
+    select($ofh);
 }
 
 
