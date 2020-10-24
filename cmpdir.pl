@@ -26,13 +26,17 @@ Indicated by two equal signs (==).
 
 Sorted descending.
 
-=item The last file modify time.
-
 =item The (number of the) original directory.
 
 The number of the directory in the command line DIRECTORY...
 
-=item The full pathname of each file.
+=item The last file modify time.
+
+On Unix there is no reliable way to determine the creation time so the modification time is used.
+
+In local strftime %Y-%m-%d %H:%M:%S format.
+
+=item The full pathname of each file (excluding the origin).
 
 =back
 
@@ -303,6 +307,8 @@ sub process ()
             ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
 
             $eq = (defined($prev_file) && $file->cmp($prev_file) == 0 ? '==' : '');
+
+            $filename = substr($filename, length($file->origin)+1);
         
             write;
         
