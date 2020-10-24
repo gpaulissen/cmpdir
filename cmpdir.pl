@@ -131,7 +131,7 @@ my $program = &basename($0);
 my %dirs;
 my %files;
 my @cmp = (0, 0, 0, 0, 0);
-my @descr = ( '==             ',
+my @descr = ( '== file compare',
               '!= before      ',
               '!= size        ',
               '!= crc32       ',
