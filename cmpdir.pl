@@ -135,7 +135,7 @@ my $verbose = 0;
 
 # FORMATS
 
-my ($nr, $origin, $eq, $size, $mtime, $filename, $descr, $cmp);
+my ($nr, $origin, $eq, $display_size, $mtime, $filename, $descr, $cmp);
 
 format ORIGIN_TOP =
 Nr  Origin
@@ -154,7 +154,7 @@ Eq           Size  Origin  Modification time    Filename
 
 format FILE =
 @<  @>>>>>>>>>>>>  @>>>>>  @<<<<<<<<<<<<<<<<<<  @*
-$eq, $size, $origin, $mtime, $filename
+$eq, $display_size, $origin, $mtime, $filename
 .
 
 format COMPARE_TOP =
@@ -175,7 +175,7 @@ sub process_command_line ();
 sub process ();
 sub log (@);
 sub quote ($);
-
+sub by_cmp ();
                                                          
 # MAIN
 
@@ -245,8 +245,8 @@ sub prepare ()
 
             $blksize = 512 unless defined($blksize) && $blksize ne "";    
 
-            $files{$filename} = MyFile->new(filename => $filename, size => $size, mtime => $mtime, blksize => $blksize, origin => $origin)
-                unless exists $files{$filename};
+            $files{$size}{$filename} = MyFile->new(filename => $filename, size => $size, mtime => $mtime, blksize => $blksize, origin => $origin)
+                unless exists $files{$size}{$filename};
             
             &log("added file", quote($filename));
         }
@@ -283,22 +283,31 @@ sub process ()
     $ofh = select(STDOUT);
     $^ = "FILE_TOP";
     $~ = "FILE";
+
+    my ($file_nr, $nr_files) = (0, 0);
+
+    foreach (keys %files) {
+        $nr_files += scalar(keys $files{$_});
+    }
+    
     # just print one page by setting page length large enough
-    $= = (keys %files) + 2;
+    $= = 2 + $nr_files;
+    
+    # reverse size by using $b before $a
+    foreach my $size (sort { $b <=> $a } keys %files) {
+        $display_size = $size;
+        foreach my $file (sort by_cmp values $files{$size}) {
+            &log("display file", ++$file_nr, "/", $nr_files);
+        
+            ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
 
-    my ($file_nr, $nr_files) = (0, scalar(keys %files));
-    foreach my $file (reverse sort { $_ = $a->cmp($b); $cmp[abs($_)]++; &log('compare', quote($a->filename), 'with', quote($b->filename), '=', $_); return $_; } values %files) {
-        &log("display file", ++$file_nr, "/", $nr_files);
+            $eq = ((defined $prev_file ? $file->cmp($prev_file) : -1) != 0 ? '' : '==');
         
-        ($size, $origin, $filename, $mtime) = ($file->size, $dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
-
-        my $cmp = (defined $prev_file ? $file->cmp($prev_file) : -1);
+            write;
         
-        $eq = ($cmp != 0 ? '' : '==');
-        
-        write;
-        
-        $prev_file = $file;
+            $prev_file = $file;
+            $display_size = ''; # do not repeat the same size
+        }
     }
     select($ofh);
 
@@ -332,34 +341,13 @@ sub quote ($)
     return "\"$_[0]\"";
 }
 
+sub by_cmp ()
+{
+    my $retval = $b->cmp($a); # reverse
 
-__DATA__
-
-stat($filename) returns:
-
- 0 dev      device number of filesystem
- 1 ino      inode number
- 2 mode     file mode  (type and permissions)
- 3 nlink    number of (hard) links to the file
- 4 uid      numeric user ID of file's owner
- 5 gid      numeric group ID of file's owner
- 6 rdev     the device identifier (special files only)
- 7 size     total size of file, in bytes
- 8 atime    last access time in seconds since the epoch
- 9 mtime    last modify time in seconds since the epoch
-10 ctime    inode change time in seconds since the epoch (*)
-11 blksize  preferred I/O size in bytes for interacting with the
-            file (may vary from file to file)
-12 blocks   actual number of system-specific blocks allocated
-            on disk (often, but not always, 512 bytes each)
-
-
-file object:
-
-size - returned by stat()
-blksize - returned by stat()
-directory - command line
-pathname
-basename
-
+    $cmp[abs($retval)]++;
+    &log('compare', quote($b->filename), 'with', quote($a->filename), ':', $retval);
+    
+    return $retval;
+}
 
