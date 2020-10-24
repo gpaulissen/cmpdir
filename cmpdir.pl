@@ -44,6 +44,11 @@ In local strftime %Y-%m-%d %H:%M:%S format.
 
 =over 4
 
+=item B<--bytes>
+
+The number of bytes to read for the crc32 check. 
+If not specified the file block size (from stat()) will be used or 512 if that is undefined.
+
 =item B<--help>
 
 This help.
@@ -66,7 +71,7 @@ The comparison between two files is made by:
 
 =item crc32
 
-If the file sizes are equal, the first 512 bytes of each files are read and the crc32 is calculated.
+If the file sizes are equal, the first bytes of each files are read (see option bytes) and the crc32 is calculated.
 
   file1 crc32 <=> file2 crc32
 
@@ -135,6 +140,7 @@ my @descr = ( '==             ',
 
 # command line options
 
+my $bytes = undef;
 my $verbose = 0;
 
 # FORMATS
@@ -206,6 +212,7 @@ sub process_command_line ()
 
     #
     GetOptions('help' => sub { pod2usage(-verbose => 2) },
+               'bytes=i' => \$bytes,
                'verbose+' => \$verbose
         )
         or pod2usage(-verbose => 0);
@@ -247,12 +254,15 @@ sub prepare ()
         foreach my $filename ($rule->in($origin)) {
             my ($size, $mtime, $blksize) = (stat($filename))[7, 9, 11];
 
-            $blksize = 512 unless defined($blksize) && $blksize ne "";    
+            $blksize = 512 unless defined($blksize) && $blksize ne "";
+            if (defined($bytes)) {
+                $blksize = $bytes;
+            }
 
             $files{$size}{$filename} = MyFile->new(filename => $filename, size => $size, mtime => $mtime, blksize => $blksize, origin => $origin)
                 unless exists $files{$size}{$filename};
             
-            &log("added file", quote($filename));
+            &log("added file", quote($filename), 'with blocksize', $blksize);
         }
     }
 }
