@@ -27,11 +27,11 @@ sub cmp {
     my $retval;
 
     if (exists($compare_results{$self}{$file})) {
-        $retval = $compare_results{$self}{$file};
+        $retval = 1 * ($compare_results{$self}{$file} <=> 0); # something like sign
     } elsif (exists($compare_results{$file}{$self})) {
-        $retval = -1 * $compare_results{$file}{$self};
+        $retval = -1 * ($compare_results{$file}{$self} <=> 0); # something like sign
     } else {
-        $retval = ($self->size <=> $file->size);
+        $retval = 2 * ($self->size <=> $file->size);
 
         if ($retval == 0) {
             if (!defined($self->crc32)) {
@@ -42,16 +42,25 @@ sub cmp {
                 $file->calculate_crc32;
             }
 
-            $retval = ($self->crc32 <=> $file->crc32);
+            $retval = 3 * ($self->crc32 <=> $file->crc32);
 
             if ($retval == 0) {
-                $retval = File::Compare::compare($self->filename, $file->filename);
+                $retval = 4 * (File::Compare::compare($self->filename, $file->filename) <=> 0); # something like sign
             }
         }
 
         $compare_results{$self}{$file} = $retval;
     }
 
+    # return:
+    # 0        ==
+    # -1 / +1  != already compared before
+    # -2 / +2  != size
+    # -3 / +3  != crc32
+    # -4 / +4  != file compare
+    die "$retval"
+        unless abs($retval) <= 4;
+    
     return $retval;
 }
 
