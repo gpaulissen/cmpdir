@@ -276,8 +276,6 @@ sub process ()
 
     print "\n";
     
-    my $prev_file = undef;
-
     $FORMAT_LINES_LEFT = 0;
 
     $ofh = select(STDOUT);
@@ -292,16 +290,19 @@ sub process ()
     
     # just print one page by setting page length large enough
     $= = 2 + $nr_files;
-    
+
     # reverse size by using $b before $a
     foreach my $size (sort { $b <=> $a } keys %files) {
         $display_size = $size;
+
+        my $prev_file = undef;
+        
         foreach my $file (sort by_cmp values $files{$size}) {
             &log("display file", ++$file_nr, "/", $nr_files);
         
             ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
 
-            $eq = ((defined $prev_file ? $file->cmp($prev_file) : -1) != 0 ? '' : '==');
+            $eq = (defined($prev_file) && $file->cmp($prev_file) == 0 ? '==' : '');
         
             write;
         
@@ -350,4 +351,3 @@ sub by_cmp ()
     
     return $retval;
 }
-
