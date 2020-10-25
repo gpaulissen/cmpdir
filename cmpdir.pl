@@ -46,8 +46,11 @@ In local strftime %Y-%m-%d %H:%M:%S format.
 
 =item B<--bytes>
 
-The number of bytes to read for the crc32 check. 
-If not specified the file block size (from stat()) will be used or 512 if that is undefined.
+The number of bytes to read for the hash check. Defaults to 512.
+
+=item B<--function>
+
+The hash function to use (hash or crc32). Defaults to hash from the internal Perl module B.
 
 =item B<--help>
 
@@ -69,15 +72,15 @@ The comparison between two files is made by:
 
   file1 size <=> file2 size
 
-=item crc32
+=item hash
 
-If the file sizes are equal, the first bytes of each files are read (see option bytes) and the crc32 is calculated.
+If the file sizes are equal, the first bytes of each files are read (see option bytes) and the hash is calculated.
 
-  file1 crc32 <=> file2 crc32
+  file1 hash cmp file2 hash
 
 =item File::Compare::compare
 
-If the file sizes and crc32s are equal:
+If the file sizes and hashes are equal:
 
   File::Compare::compare(file1, file2)
 
@@ -105,7 +108,7 @@ First version.
 
 =cut
 
-use 5.008; # Perl 5.8 should be OK
+use 5.012;
 
 # use autodie; # automatically die when a system call gives an error (for example open)
 use strict;
@@ -113,6 +116,7 @@ use warnings;
 
 use Data::Dumper;
 
+use B qw(hash); # Perl internal hash function
 use Benchmark qw(:all) ;
 use English;
 use File::Spec;
@@ -130,22 +134,23 @@ use MyFile;
 my $program = &basename($0);
 my %dirs;
 my %files;
-my @cmp = (0, 0, 0, 0, 0);
-my @descr = ( '== file compare',
-              '!= before      ',
+# each element an array reference to compare result and number of cached results
+my @cmp = ( [0, 0], [0, 0], [0, 0], [0, 0] );
+my @descr = ( '==             ',
               '!= size        ',
-              '!= crc32       ',
+              '!= hash        ',
               '!= file compare'
             );
 
 # command line options
 
-my $bytes = undef;
+my $bytes = 512;
+my $r_hash_func = 'hash';
 my $verbose = 0;
 
 # FORMATS
 
-my ($nr, $origin, $eq, $display_size, $mtime, $filename, $descr, $cmp);
+my ($nr, $origin, $eq, $display_size, $mtime, $filename, $descr, $cmp, $cached);
 
 format ORIGIN_TOP =
 Nr  Origin
@@ -168,13 +173,13 @@ $eq, $display_size, $origin, $mtime, $filename
 .
 
 format COMPARE_TOP =
-Compare                  Count
--------                  -----
+Compare                  Count  Cached
+-------                  -----  ------
 .
 
 format COMPARE =
-@<<<<<<<<<<<<<<  @>>>>>>>>>>>>
-$descr, $cmp
+@<<<<<<<<<<<<<<  @>>>>>>>>>>>>  @>>>>>
+$descr, $cmp, $cached
 .
 
 
@@ -213,10 +218,22 @@ sub process_command_line ()
     #
     GetOptions('help' => sub { pod2usage(-verbose => 2) },
                'bytes=i' => \$bytes,
+               'function=s' => \$r_hash_func,
                'verbose+' => \$verbose
         )
         or pod2usage(-verbose => 0);
 
+    pod2usage(-message => "$0: Bytes ($bytes) must be at least 1. Run with --help option.\n")
+        unless defined($bytes) && $bytes >= 1;
+
+    my %hash_func = ( 'hash' => \&hash, 'crc32' => \&crc32 );
+    my @hash_func = sort keys %hash_func;
+
+    pod2usage(-message => "$0: Must supply a valid hash function (@hash_func). Run with --help option.\n")
+        unless exists $hash_func{$r_hash_func};
+
+    $r_hash_func = $hash_func{$r_hash_func};
+    
     pod2usage(-message => "$0: Must supply at least one directory. Run with --help option.\n")
         unless @ARGV >= 1;
 
@@ -240,7 +257,7 @@ sub prepare ()
                ->file
                # ignore hidden (Unix) files
                ->not_name('.?*'));
-
+    
     foreach my $dir (@ARGV) {
         &log("scanning directory", quote($dir));
         
@@ -251,18 +268,26 @@ sub prepare ()
             $dirs{$origin} = (keys %dirs) + 1;
         }            
 
-        foreach my $filename ($rule->in($origin)) {
-            my ($size, $mtime, $blksize) = (stat($filename))[7, 9, 11];
+        my @files = $rule->in($origin);
 
-            $blksize = 512 unless defined($blksize) && $blksize ne "";
-            if (defined($bytes)) {
-                $blksize = $bytes;
-            }
+        # preallocate the bucket
+        # %files will contain every file (prefixed with -) and every size (never negative)
+        keys %files = scalar(%files) + 2 * scalar(@files);
 
-            $files{$size}{$filename} = MyFile->new(filename => $filename, size => $size, mtime => $mtime, blksize => $blksize, origin => $origin)
-                unless exists $files{$size}{$filename};
+        foreach my $filename (@files) {
+            my ($size, $mtime) = (stat($filename))[7, 9];
+
+            # check duplicates
+            if (!exists($files{'-' . $filename})) {
+                $files{'-' . $filename} = 1;
+                
+                $files{$size} = []
+                    unless exists $files{$size};
+        
+                push(@{$files{$size}}, MyFile->new(filename => $filename, size => $size, mtime => $mtime, origin => $origin));
             
-            &log("added file", quote($filename), 'with blocksize', $blksize);
+                &log("added file", quote($filename));
+            }
         }
     }
 }
@@ -296,22 +321,19 @@ sub process ()
     $^ = "FILE_TOP";
     $~ = "FILE";
 
-    my ($file_nr, $nr_files) = (0, 0);
-
-    foreach (keys %files) {
-        $nr_files += scalar(keys $files{$_});
-    }
+    my ($file_nr, $nr_files) = (0, scalar(grep(/^-/, keys %files)));
     
     # just print one page by setting page length large enough
     $= = 2 + $nr_files;
 
     # reverse size by using $b before $a
-    foreach my $size (sort { $b <=> $a } keys %files) {
+    # skip the filename items
+    foreach my $size (sort { $b <=> $a } grep(!/^-/, keys %files)) {
         $display_size = $size;
 
         my $prev_file = undef;
         
-        foreach my $file (sort by_cmp values $files{$size}) {
+        foreach my $file (sort by_cmp values @{$files{$size}}) {
             &log("display file", ++$file_nr, "/", $nr_files);
         
             ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
@@ -338,7 +360,7 @@ sub process ()
     $= = scalar(@cmp) + 2;
 
     for my $i (0..$#cmp) {
-        ($descr, $cmp) = ($descr[$i], $cmp[$i]);
+        ($descr, $cmp, $cached) = ($descr[$i], $cmp[$i][0], $cmp[$i][1]);
         write;
     }
     select($ofh);
@@ -360,10 +382,44 @@ sub quote ($)
 
 sub by_cmp ()
 {
-    my $retval = $b->cmp($a); # reverse
+    my ($retval, $cache) = $b->cmp($a, $r_hash_func, $bytes); # reverse by using $b before $a
 
-    $cmp[abs($retval)]++;
-    &log('compare', quote($b->filename), 'with', quote($a->filename), ':', $retval);
+    $cmp[abs($retval)][0]++;
+    $cmp[abs($retval)][1] += $cache;
+    
+    &log('compare', quote($b->filename), 'with', quote($a->filename), ': [', $retval, $cache, ']');
     
     return $retval;
+}
+
+sub crc32 {    
+    # http://billauer.co.il/blog/2011/05/perl-crc32-crc-xs-module/
+    my ($input, $init_value, $polynomial) = @_;
+
+    $init_value = 0 unless (defined $init_value);
+    $polynomial = 0xedb88320 unless (defined $polynomial);
+
+    my @lookup_table;
+
+    for (my $i=0; $i<256; $i++) {
+        my $x = $i;
+        for (my $j=0; $j<8; $j++) {
+            if ($x & 1) {
+                $x = ($x >> 1) ^ $polynomial;
+            } else {
+                $x = $x >> 1;
+            }
+        }
+        push @lookup_table, $x;
+    }
+
+    my $crc = $init_value ^ 0xffffffff;
+
+    foreach my $x (unpack ('C*', $input)) {
+        $crc = (($crc >> 8) & 0xffffff) ^ $lookup_table[ ($crc ^ $x) & 0xff ];
+    }
+    
+    $crc = $crc ^ 0xffffffff;
+
+    return $crc;
 }
