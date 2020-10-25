@@ -117,7 +117,6 @@ use warnings;
 use Data::Dumper;
 
 use B qw(hash); # Perl internal hash function
-use Benchmark qw(:all) ;
 use English;
 use File::Spec;
 use File::Basename;
@@ -201,7 +200,8 @@ main();
 sub main () 
 {
     process_command_line();
-    timethese(1, { '1 - prepare' => \&prepare, '2 - process' => \&process }, 'nop');
+    prepare();
+    process();
 }
 
 sub process_command_line ()
