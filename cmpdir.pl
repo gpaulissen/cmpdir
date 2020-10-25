@@ -189,8 +189,9 @@ sub process_command_line ();
 sub process ();
 sub log (@);
 sub quote ($);
-sub by_cmp ();
-                                                         
+sub by_cmp (;$$);
+sub crc32 ($;$$);
+
 # MAIN
 
 main();
@@ -338,7 +339,7 @@ sub process ()
         
             ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
 
-            $eq = (defined($prev_file) && $file->cmp($prev_file) == 0 ? '==' : '');
+            $eq = (defined($prev_file) && by_cmp($file, $prev_file) == 0 ? '==' : '');
 
             $filename = substr($filename, length($file->origin)+1);
         
@@ -380,8 +381,12 @@ sub quote ($)
     return "\"$_[0]\"";
 }
 
-sub by_cmp ()
+sub by_cmp (;$$)
 {
+    if (scalar(@_) == 2) {
+        ($a, $b) = @_;
+    }
+    
     my ($retval, $cache) = $b->cmp($a, $r_hash_func, $bytes); # reverse by using $b before $a
 
     $cmp[abs($retval)][0]++;
@@ -392,7 +397,7 @@ sub by_cmp ()
     return $retval;
 }
 
-sub crc32 {    
+sub crc32 ($;$$) {    
     # http://billauer.co.il/blog/2011/05/perl-crc32-crc-xs-module/
     my ($input, $init_value, $polynomial) = @_;
 
