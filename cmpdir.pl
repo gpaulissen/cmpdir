@@ -273,7 +273,7 @@ sub prepare ()
 
         # preallocate the bucket
         # %files will contain every file (prefixed with -) and every size (never negative)
-        keys %files = scalar(%files) + 2 * scalar(@files);
+        keys %files = scalar(keys %files) + 2 * scalar(@files);
 
         foreach my $filename (@files) {
             my ($size, $mtime) = (stat($filename))[7, 9];
