@@ -4,7 +4,7 @@
 
 =head1 NAME
 
-cmpdir.pl - Compare the files in one or more directories (recursive), merge or analyze the compare STDOUT output. 
+cmpdir.pl - Compare the files in one or more directories (recursively), merge or analyze the compare STDOUT output. 
 
 =head1 SYNOPSIS
 
@@ -34,13 +34,13 @@ Indicated by two equal signs (==).
 
 =item The file size.
 
-Sorted descending.
+Sorted descending. Not displayed when the file size is equal to the previous file.
 
 =item The (number of the) original directory.
 
 The number of the directory in the command line DIRECTORY...
 
-=item The last file modify time.
+=item The last file modification time.
 
 On Unix there is no reliable way to determine the creation time so the modification time is used.
 
@@ -50,13 +50,20 @@ In local strftime %Y-%m-%d %H:%M:%S format.
 
 =back
 
+=head2 Merge the compare results
+
+The second Use Case is to merge the output of two or more comparisons. Might
+be useful if you compared directories A and B and later B and C. If a file
+size or modification time has changed, the program will abort since there is
+no reliable merge result anymore.
+
 =head2 Analyze the compare results
 
-The second Use Case is to compare the output of one or more comparisons.
+The third Use Case is to (merge and) analyze the output of one or more comparisons.
 
-Every file in the standard output from the compare subcommand is gathered
-based on size. If the number of files is not equal to the number of
-directories or if not every file is equal the files are shown.
+A condensed report will be shown with only files with a size at least the
+threshold AND where the number of equal files for a size is not the number of
+the directories. In other words where not every directory has the same file.
 
 =head1 OPTIONS
 
@@ -287,7 +294,7 @@ sub process_command_line ()
                    if ($arg =~ m/^-/) {
                        die "Usage error: unhandled option $arg detected in global option section";
                    } elsif ($arg !~ m/^(compare|merge|analyze)$/) {
-                       die "usage error: invalid subcommand $arg";
+                       die "Usage error: invalid subcommand $arg";
                    } else {
                        $subcmd = $arg;
                        die '!FINISH'; # stop processing arguments 
@@ -427,7 +434,7 @@ sub process_files ($) {
                     if ($equal) {
                         $hash = $prev_file->hash;
                     } else {
-                        $hash = keys %files; # just a unique number
+                        $hash = sprintf("%020d", scalar(keys %files)); # just a unique number converted to a string that is useful for string compares
                     }
 
                     die "\$hash undefined"
@@ -438,7 +445,6 @@ sub process_files ($) {
                     die "\$file->hash undefined"
                         unless defined($file->hash);
                     
-
                     $files{$size} = []
                         unless exists $files{$size};
 
@@ -450,8 +456,8 @@ sub process_files ($) {
                 } else {
                     $file = $files{'-' . $filename};
 
-                    die "Size of $filename has changed from $file->size to $size."
-                        unless $file->size == $size;
+                    die "Size ($size) and/or modification time ($mtime) of $filename has changed. Original: " . $file->str()
+                        unless $file->size == $size && $file->mtime eq $mtime;
                 }
                 
                 $prev_file = $file;
@@ -466,6 +472,29 @@ sub analyze ($) {
 }
 
 sub print_analysis () {
+    my @sizes = grep(!/^-/, keys %files);
+    
+    foreach my $size (sort { int($b) <=> int($a) } @sizes) {
+        if ($size < $threshold) {
+            delete $files{$size}; # only analyze files at least the threshold
+        } else {
+            my $rh = $files{$size};
+            my $file_count = scalar(@$rh);
+            my $equal = 1;
+            
+            for my $i (1..scalar(@$rh)-1) {
+                $equal++
+                    if $rh->[$i]->hash() eq $rh->[0]->hash();
+            }
+
+            # when every file is equal and the number of files is equal to the directory count: remove
+            if ($equal == $file_count && $equal == scalar(keys %dirs)) {
+                delete $files{$size};
+            }
+        }
+    }
+
+    process();
 }
 
 sub trim ($) {
@@ -663,9 +692,10 @@ sub crc32 ($;$$) {
 }
 
 sub unit_test () {
-    $threshold = 9;
-
     process_files('DATA');
+
+    process()
+        if $verbose > 0;
     
     my ($rh_folders, $rh_files) = (\%dirs, \%files);
     my $rh;
@@ -673,17 +703,23 @@ sub unit_test () {
 
     plan tests => 2 + 2 * scalar(@sizes);
 
-    ok( keys %$rh_folders == 2, 'number of folders should be 2' );
+    my $nr_folders_exp = 3;
+    
+    ok( keys %$rh_folders == $nr_folders_exp, "number of folders should be $nr_folders_exp" );
 
-    ok( @sizes == 16, 'number of files ' . scalar(@sizes) . ' should be 16' ); # threshold of 9
+    my $nr_file_sizes_exp = 19;
+
+    ok( @sizes == $nr_file_sizes_exp, 'number of file sizes ' . scalar(@sizes) . " should be $nr_file_sizes_exp" );
 
     foreach my $size (sort { int($b) <=> int($a) } @sizes) {
         my $rh = $rh_files->{$size};
         my $file_count_act = scalar(@$rh);
         my $file_count_exp;
 
-        if ( $size =~ m/^(92583948|92331344|50316|5858|4485|1193|1047)$/ ) {
+        if ( $size =~ m/^(92583948|83897684|50316|5858|5281|4877|4485|1193|1047)$/ ) {
             $file_count_exp = 1;
+        } elsif ( $size =~ m/^(83094530|79516345|75972781|75455261|74990074|32768|16384|8)$/ ) {
+            $file_count_exp = 3;
         } else {
             $file_count_exp = 2;
         }
@@ -691,7 +727,15 @@ sub unit_test () {
         ok( $file_count_act == $file_count_exp, "number of files with size $size ($file_count_act) should be $file_count_exp" );
 
         my $equal_act = 1;
-        my $equal_exp = ( $size =~ m/^(32768|16384|82|8)$/ ? $file_count_act - 1 : $file_count_act );
+        my $equal_exp;
+
+        if ( $size =~ m/^(32768|16384|5858|4877|8)$/ ) {
+            $equal_exp = 1;
+        } elsif ( $size =~ m/^(82)$/ ) {
+            $equal_exp = $file_count_act - 1;
+        } else {
+            $equal_exp = $file_count_act;
+        }
 
         info("file 0:", $rh->[0]->str());
         
@@ -751,4 +795,45 @@ Compare                  Count  Cached
 ==                        4408    2204
 != size                      0       0
 != hash                    122      42
+!= file compare              0       0
+
+
+Nr  Origin
+--  ------
+1   /Volumes/iTunes/Music
+2   /Volumes/Disk1/iTunes
+
+Eq           Size  Origin  Modification time    Filename
+--           ----  ------  -----------------    --------
+         92331344       1  2018-09-30 11:46:44  Music/Media.localized/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
+==                      2  2018-09-30 11:46:44  iTunes Media/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
+         83897684       2  2015-07-17 12:38:28  iTunes Media/Mobile Applications/Docs 1.2.8526.ipa
+         83094530       1  2014-10-12 13:32:30  Music/Media.localized/Music/Led Zeppelin/Celebration Day [Live] [Disc 1]/1-04 In My Time Of Dying.m4a
+==                      2  2014-10-12 13:32:30  iTunes Media/Music/Led Zeppelin/Celebration Day [Live] [Disc 1]/1-04 In My Time Of Dying.m4a
+         79516345       1  2014-10-12 13:32:48  Music/Media.localized/Music/Led Zeppelin/Celebration Day [Live] [Disc 2]/2-02 Dazed And Confused.m4a
+==                      2  2014-10-12 13:32:48  iTunes Media/Music/Led Zeppelin/Celebration Day [Live] [Disc 2]/2-02 Dazed And Confused.m4a
+         75972781       1  2014-10-12 13:35:12  Music/Media.localized/Music/Led Zeppelin/Led Zeppelin Remasters [Disc 2]/2-09 Achilles Last Stand.m4a
+==                      2  2014-10-12 13:35:12  iTunes Media/Music/Led Zeppelin/Led Zeppelin Remasters [Disc 2]/2-09 Achilles Last Stand.m4a
+         75455261       1  2014-10-12 13:46:34  Music/Media.localized/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a
+==                      2  2014-10-12 13:46:34  iTunes Media/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a
+         74990074       1  2014-10-08 22:14:42  Music/Media.localized/Blue Oyster Cult/Extraterrestial/1-07 Roadhouse blues.m4a
+==                      2  2014-10-08 22:14:42  iTunes Media/Music/Blue Oyster Cult/Extraterrestial/1-07 Roadhouse blues.m4a
+            50316       1  2020-10-26 15:48:50  Music/iTunes Music Library.xml
+            32768       1  2020-09-27 15:34:17  Music/Music Library.musiclibrary/Genius.itdb
+                        2  2015-11-07 08:24:04  iTunes Library Genius.itdb
+            16384       1  2020-10-26 12:30:00  Music/Music Library.musiclibrary/Extras.itdb
+                        2  2015-11-07 08:33:37  iTunes Library Extras.itdb
+             5281       2  2015-11-06 11:24:39  iTunes Library.itl.bak
+             4877       2  2015-07-17 11:42:45  Previous iTunes Libraries/iTunes Library 2015-07-17.itl
+             4485       1  2020-10-26 12:29:32  Music/Music Library.musiclibrary/Application.musicdb
+             1047       1  2020-10-26 09:24:21  Music/Music Library.musiclibrary/Library Preferences.musicdb
+               82       1  2020-10-26 09:24:42  Music/Music Library.musiclibrary/Preferences.plist
+                8       2  2015-07-18 10:04:34  sentinel
+                        1  2020-10-26 15:42:54  Music/Music Library.musiclibrary/sentinel
+
+Compare                  Count  Cached
+-------                  -----  ------
+==                        4461    2202
+!= size                      0       0
+!= hash                   3840     924
 != file compare              0       0
