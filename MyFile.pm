@@ -10,13 +10,21 @@ has 'filename' => ( is => 'ro', isa => 'Str', required => 1 );
 
 has 'size' => ( is => 'ro', isa => 'Int', required => 1 );
     
-has 'mtime' => ( is => 'ro', isa => 'Int', required => 1 );
+has 'mtime' => ( is => 'ro', isa => 'Str', required => 1 );
 
 has 'origin' => ( is => 'ro', isa => 'Str', required => 1 );
 
 has 'hash' => ( is => 'rw', isa => 'Str', required => 0 );
 
 my %compare_results; # cache cmp() results
+
+sub str {
+    my ($self) = @_;
+
+    my @info = ('filename:', $self->filename, '; size:', $self->size, '; mtime:', $self->mtime, '; origin:', $self->origin, '; hash:', $self->hash);
+
+    return "@info";
+}
 
 sub cmp {
     my ($self, $file, $r_hash_func, $max_bytes_to_read) = @_;
@@ -32,6 +40,9 @@ sub cmp {
         $retval = 1 * ($self->size <=> $file->size);
 
         if ($retval == 0) {
+            die "\$max_bytes_to_read is undefined"
+                unless (defined($max_bytes_to_read) || (defined($self->hash) && defined($file->hash)));
+            
             if (!defined($self->hash)) {
                 $self->hash($self->calculate($r_hash_func, $max_bytes_to_read));
             }
@@ -44,7 +55,8 @@ sub cmp {
             # so now we can deduce that if cmp returns not 0 that the files are not equal.
             $retval = 2 * ($self->hash cmp $file->hash);
 
-            if ($retval == 0) {
+            # Only compare files in compare modus
+            if ($retval == 0 && defined($max_bytes_to_read)) {
                 $retval = 3 * (File::Compare::compare($self->filename, $file->filename) <=> 0); # something like sign
             }
         }

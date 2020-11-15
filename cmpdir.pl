@@ -4,11 +4,15 @@
 
 =head1 NAME
 
-cmpdir.pl - Compare the files in one or more directories (recursive) or analyze the compare STDOUT output. 
+cmpdir.pl - Compare the files in one or more directories (recursive), merge or analyze the compare STDOUT output. 
 
 =head1 SYNOPSIS
 
   cmpdir.pl [GLOBAL OPTION...] compare [compare OPTION...] DIRECTORY...
+
+or
+
+  cmpdir.pl [GLOBAL OPTION...] merge FILE...
 
 or
 
@@ -180,7 +184,7 @@ my @descr = ( '==             ',
 
 # command line options
 
-my $bytes = 512;
+my $bytes = undef;
 my $r_hash_func = 'hash';
 my $unit_test = 0;
 my $verbose = 0;
@@ -227,12 +231,14 @@ $descr, $cmp, $cached
 sub main ();
 sub process_command_line ();
 sub compare ();
+sub merge ($);
+sub process_files ($);
 sub analyze ($);
-sub print_analysis ($$);
+sub print_analysis ();
 sub trim ($);
-sub prepare ();
+sub process_directories ();
 sub process ();
-sub log (@);
+sub info (@);
 sub quote ($);
 sub by_cmp (;$$);
 sub crc32 ($;$$);
@@ -252,10 +258,10 @@ sub main ()
         unit_test();
     } elsif ($subcmd eq 'compare') {
         compare();
+    } elsif ($subcmd eq 'merge') {
+        merge('ARGV');
     } elsif ($subcmd eq 'analyze') {
-        my ($rh_folders, $rh_files) = analyze('ARGV');
-        
-        print_analysis($rh_folders, $rh_files);
+        analyze('ARGV');        
     }
 }
 
@@ -280,7 +286,7 @@ sub process_command_line ()
 
                    if ($arg =~ m/^-/) {
                        die "Usage error: unhandled option $arg detected in global option section";
-                   } elsif ($arg !~ m/^(compare|analyze)$/) {
+                   } elsif ($arg !~ m/^(compare|merge|analyze)$/) {
                        die "usage error: invalid subcommand $arg";
                    } else {
                        $subcmd = $arg;
@@ -297,8 +303,11 @@ sub process_command_line ()
                    'function=s' => \$r_hash_func)
             or pod2usage(-verbose => 0);
 
+        $bytes = 512
+            unless defined($bytes);
+        
         pod2usage(-message => "$0: Bytes ($bytes) must be at least 1. Run with --help option.\n")
-            unless defined($bytes) && $bytes >= 1;
+            unless $bytes >= 1;
 
         my %hash_func = ( 'hash' => \&hash, 'crc32' => \&crc32 );
         my @hash_func = sort keys %hash_func;
@@ -330,27 +339,37 @@ sub process_command_line ()
 }
 
 sub compare () {
-    prepare();
+    process_directories();
     process();
 }
     
-sub analyze ($) {
+sub merge ($) {
+    process_files($_[0]);
+    process();
+}
+
+sub process_files ($) {    
     my $fh = shift @_;
     my @pos = ();
     my $part = undef;
-    my $prev_size;
-    # return values
-    my (@folders, %folders, %files);
-    
-    while (my $line = <$fh>){
+    my $prev_file;
+    my @dirs;
+
+    my @lines = <$fh>; # slurp
+
+    # preallocate the bucket
+    # %files will contain every file (prefixed with -) and every size (never negative)
+    keys %files = 2 * scalar(@lines);
+
+    foreach my $line (@lines) {
         chomp $line;
 
         if ($line eq 'Nr  Origin') {
             ;
         } elsif ($line eq '--  ------') {
             @pos = ( [0, 2], [4, undef] );
-            @folders = ();
             $part = 1;
+            @dirs = ();
         } elsif ($line eq 'Eq           Size  Origin  Modification time    Filename') {
             ;
         } elsif ($line eq '--           ----  ------  -----------------    --------') {
@@ -361,12 +380,12 @@ sub analyze ($) {
         } elsif ($line eq '-------                  -----  ------') {
             @pos = ();        
         } elsif (scalar(@pos) > 0&& length($line) > 0) {
-            &log("line:", $line);
+            info("line:", $line);
             
             my @cols = ();
 
             foreach my $pos (@pos) {
-                my ($offset, $length) = ( $pos->[0], $pos->[1] );
+                my ($offset, $length) = ($pos->[0], $pos->[1]);
 
                 push(@cols, trim( defined($length) ? substr($line, $offset, $length) : substr($line, $offset) ));
             }
@@ -378,58 +397,75 @@ sub analyze ($) {
                     $line .= "[$i] '$cols[$i]' ";
                 }
                 
-                &log("pos:", $line);
+                info("pos:", $line);
             }
 
             if ($part == 1) {
-                # folders
-                $folders[$cols[0]] = $cols[1];
-                $folders{$cols[1]}++;
+                # store the origin
+                my ($index, $origin) = @cols;
+                
+                $dirs[$index] = $origin;
+                
+                if (!exists($dirs{$origin})) {
+                    $dirs{$origin} = (keys %dirs) + 1;
+                }
             } else {
-                my ($equal, $size, $folder, $filename) = (($cols[0] eq '=='), $cols[1], $folders[$cols[2]], $cols[4]);
+                my ($equal, $size, $origin, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $dirs[$cols[2]], $cols[3], $cols[4]);
+                my $file;
 
                 if ($size eq '') {
-                    $size = $prev_size;
+                    $size = $prev_file->size;
                 }
 
-                if ($size >= $threshold) {
-                    # files
-                    if (!exists($files{$size}{files})) {
-                        $files{$size}{files} = [ "\n$folder/$filename" ];
-                        $files{$size}{equal} = 1;
-                    } else {
-                        push(@{$files{$size}{files}}, "\n$folder/$filename");
-                        $files{$size}{equal} += $equal;
-                    }
+                $filename = "$origin/$filename";
                 
-                    &log("files for $size:", "@{$files{$size}{files}}");
+                # check duplicates
+                if (!exists($files{'-' . $filename})) {
+                    my $hash;
+                    
+                    # take the hash of the predecessor if the files are equal
+                    if ($equal) {
+                        $hash = $prev_file->hash;
+                    } else {
+                        $hash = keys %files; # just a unique number
+                    }
+
+                    die "\$hash undefined"
+                        unless defined($hash);
+                    
+                    $file = MyFile->new(filename => $filename, size => $size, mtime => $mtime, origin => $origin, hash => $hash);
+
+                    die "\$file->hash undefined"
+                        unless defined($file->hash);
+                    
+
+                    $files{$size} = []
+                        unless exists $files{$size};
+
+                    $files{'-' . $filename} = $file;
+                    
+                    push(@{$files{$size}}, $file);
+                    
+                    info("added file", quote($filename), 'with hash', $file->hash);
+                } else {
+                    $file = $files{'-' . $filename};
+
+                    die "Size of $filename has changed from $file->size to $size."
+                        unless $file->size == $size;
                 }
                 
-                $prev_size = $size;
+                $prev_file = $file;
             }
         }
     }
-
-    return (\%folders, \%files);
 }
 
-sub print_analysis ($$) {
-    my ($rh_folders, $rh_files) = (@_);
-    
-    my $folder_count = scalar(keys %$rh_folders);
+sub analyze ($) {
+    process_files($_[0]);
+    print_analysis();
+}
 
-    print STDOUT "\nNumber of folders: $folder_count\n";
-
-    foreach my $size (sort { int($b) <=> int($a) } keys %{$rh_files}) {
-        my $rh = $rh_files->{$size};
-        
-        if ($size >= $threshold) {
-            my $file_count = scalar(@{$rh->{files}});
-            
-            print STDOUT "\nNumber of files for size $size not $folder_count or not all equal: ", "@{$rh->{files}}\n" 
-                if ($file_count != $folder_count || $rh->{equal} != $folder_count);
-        }
-    }
+sub print_analysis () {
 }
 
 sub trim ($) {
@@ -440,7 +476,7 @@ sub trim ($) {
     return $str;
 }
 
-sub prepare ()
+sub process_directories ()
 {
     my $rule = File::Find::Rule->new;
 
@@ -456,7 +492,7 @@ sub prepare ()
                ->not_name('.?*'));
     
     foreach my $dir (@ARGV) {
-        &log("scanning directory", quote($dir));
+        info("scanning directory", quote($dir));
         
         # store the origin
         my $origin = File::Spec->rel2abs($dir);
@@ -480,10 +516,10 @@ sub prepare ()
                 
                 $files{$size} = []
                     unless exists $files{$size};
-        
-                push(@{$files{$size}}, MyFile->new(filename => $filename, size => $size, mtime => $mtime, origin => $origin));
+
+                push(@{$files{$size}}, MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin => $origin));
             
-                &log("added file", quote($filename));
+                info("added file", quote($filename));
             }
         }
     }
@@ -531,12 +567,13 @@ sub process ()
         my $prev_file = undef;
         
         foreach my $file (sort by_cmp values @{$files{$size}}) {
-            &log("display file", ++$file_nr, "/", $nr_files);
+            info("display file", ++$file_nr, "/", $nr_files);
         
-            ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, strftime('%Y-%m-%d %H:%M:%S', localtime($file->mtime)));
+            ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, $file->mtime);
 
             $eq = (defined($prev_file) && by_cmp($file, $prev_file) == 0 ? '==' : '');
 
+            # strip origin from filename
             $filename = substr($filename, length($file->origin)+1);
         
             write;
@@ -565,7 +602,7 @@ sub process ()
     print "\n";
 }
 
-sub log (@)
+sub info (@)
 {
     return unless $verbose > 0;
 
@@ -588,7 +625,7 @@ sub by_cmp (;$$)
     $cmp[abs($retval)][0]++;
     $cmp[abs($retval)][1] += $cache;
     
-    &log('compare', quote($b->filename), 'with', quote($a->filename), ': [', $retval, $cache, ']');
+    info('compare', quote($b->filename), 'with', quote($a->filename), ': [', $retval, $cache, ']');
     
     return $retval;
 }
@@ -627,20 +664,22 @@ sub crc32 ($;$$) {
 
 sub unit_test () {
     $threshold = 9;
+
+    process_files('DATA');
     
-    my ($rh_folders, $rh_files) = analyze('DATA');
-
-    plan tests => 2 + 2 * scalar(keys %$rh_files);
-
+    my ($rh_folders, $rh_files) = (\%dirs, \%files);
     my $rh;
+    my @sizes = grep(!/^-/, keys %$rh_files);
+
+    plan tests => 2 + 2 * scalar(@sizes);
 
     ok( keys %$rh_folders == 2, 'number of folders should be 2' );
-    
-    ok( keys %$rh_files == 15, 'number of files should be 15' ); # threshold of 9
 
-    foreach my $size (sort { int($b) <=> int($a) } keys %$rh_files) {
+    ok( @sizes == 16, 'number of files ' . scalar(@sizes) . ' should be 16' ); # threshold of 9
+
+    foreach my $size (sort { int($b) <=> int($a) } @sizes) {
         my $rh = $rh_files->{$size};
-        my $file_count_act = scalar(@{$rh->{files}});
+        my $file_count_act = scalar(@$rh);
         my $file_count_exp;
 
         if ( $size =~ m/^(92583948|92331344|50316|5858|4485|1193|1047)$/ ) {
@@ -651,8 +690,17 @@ sub unit_test () {
 
         ok( $file_count_act == $file_count_exp, "number of files with size $size ($file_count_act) should be $file_count_exp" );
 
-        my $equal_act = $rh->{equal};
-        my $equal_exp = ( $size =~ m/^(32768|16384|82)$/ ? $file_count_act - 1 : $file_count_act );
+        my $equal_act = 1;
+        my $equal_exp = ( $size =~ m/^(32768|16384|82|8)$/ ? $file_count_act - 1 : $file_count_act );
+
+        info("file 0:", $rh->[0]->str());
+        
+        for my $i (1..scalar(@$rh)-1) {
+            info("file $i:", $rh->[$i]->str());
+            
+            $equal_act++
+                if $rh->[$i]->hash() eq $rh->[0]->hash();
+        }
 
         ok( $equal_act == $equal_exp, "number of equal files with size $size ($equal_act) should be $equal_exp" );
     }
@@ -704,4 +752,3 @@ Compare                  Count  Cached
 != size                      0       0
 != hash                    122      42
 != file compare              0       0
-
