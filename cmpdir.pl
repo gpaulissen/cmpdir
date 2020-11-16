@@ -2,6 +2,8 @@
 
 =pod
 
+=encoding utf8
+
 =head1 NAME
 
 cmpdir.pl - Compare the files in one or more directories (recursively), merge or analyze the compare STDOUT output. 
@@ -62,8 +64,27 @@ no reliable merge result anymore.
 The third Use Case is to (merge and) analyze the output of one or more comparisons.
 
 A condensed report will be shown with only files with a size at least the
-threshold AND where the number of equal files for a size is not the number of
-the directories. In other words where not every directory has the same file.
+threshold AND for each different file size one of the following conditions is NOT met:
+
+=over 4
+
+=item *
+
+every file is equal (size, hash and basename).
+
+=item *
+
+the number of files is equal to the directory count.
+
+=item *
+
+every file has a different origin.
+
+=back
+
+In other words when a file basename is present on all directories with the
+same size and hash and no other basename with that size is present it will NOT
+be shown. So the report does not show files that seem okay.
 
 =head1 OPTIONS
 
@@ -153,9 +174,15 @@ Gert-Jan Paulissen, E<lt>gert.jan.paulissen@gmail.comE<gt>.
 
 First version.
 
+2020-11-16  G.J. Paulissen
+
+Added merge and analyze subcommands.
+
 =cut
 
 use 5.012;
+
+use utf8;
 
 # use autodie; # automatically die when a system call gives an error (for example open)
 use strict;
@@ -259,6 +286,9 @@ main();
 
 sub main () 
 {
+    binmode(STDOUT, ":utf8");
+    binmode(STDERR, ":utf8");
+    
     process_command_line();
 
     if ($unit_test) {
@@ -478,17 +508,24 @@ sub print_analysis () {
         if ($size < $threshold) {
             delete $files{$size}; # only analyze files at least the threshold
         } else {
-            my $rh = $files{$size};
-            my $file_count = scalar(@$rh);
+            my $ra = $files{$size};
+            my $file_count = scalar(@$ra);
             my $equal = 1;
+            my %dirs_found = ( $ra->[0]->origin => 1 );
             
-            for my $i (1..scalar(@$rh)-1) {
+            for my $i (1..scalar(@$ra)-1) {
+                $dirs_found{$ra->[$i]->origin} = 1;
                 $equal++
-                    if $rh->[$i]->hash() eq $rh->[0]->hash();
+                    if $ra->[$i]->hash() eq $ra->[0]->hash() && basename($ra->[$i]->filename) eq basename($ra->[0]->filename);
             }
 
-            # when every file is equal and the number of files is equal to the directory count: remove
-            if ($equal == $file_count && $equal == scalar(keys %dirs)) {
+            #
+            # remove when all seems well, i.e.:
+            # 1) every file is equal (size, hash and basename) AND
+            # 2) the number of files is equal to the directory count AND
+            # 3) every file has a different origin
+            
+            if ($equal == $file_count && $file_count == scalar(keys %dirs) && $file_count == scalar(keys %dirs_found)) {
                 delete $files{$size};
             }
         }
@@ -541,12 +578,14 @@ sub process_directories ()
 
             # check duplicates
             if (!exists($files{'-' . $filename})) {
-                $files{'-' . $filename} = 1;
+                my $file = MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin => $origin);
+                
+                $files{'-' . $filename} = $file;
                 
                 $files{$size} = []
                     unless exists $files{$size};
 
-                push(@{$files{$size}}, MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin => $origin));
+                push(@{$files{$size}}, $file);
             
                 info("added file", quote($filename));
             }
@@ -698,7 +737,6 @@ sub unit_test () {
         if $verbose > 0;
     
     my ($rh_folders, $rh_files) = (\%dirs, \%files);
-    my $rh;
     my @sizes = grep(!/^-/, keys %$rh_files);
 
     plan tests => 2 + 2 * scalar(@sizes);
@@ -712,8 +750,8 @@ sub unit_test () {
     ok( @sizes == $nr_file_sizes_exp, 'number of file sizes ' . scalar(@sizes) . " should be $nr_file_sizes_exp" );
 
     foreach my $size (sort { int($b) <=> int($a) } @sizes) {
-        my $rh = $rh_files->{$size};
-        my $file_count_act = scalar(@$rh);
+        my $ra = $rh_files->{$size};
+        my $file_count_act = scalar(@$ra);
         my $file_count_exp;
 
         if ( $size =~ m/^(92583948|83897684|50316|5858|5281|4877|4485|1193|1047)$/ ) {
@@ -737,13 +775,13 @@ sub unit_test () {
             $equal_exp = $file_count_act;
         }
 
-        info("file 0:", $rh->[0]->str());
+        info("file 0:", $ra->[0]->str());
         
-        for my $i (1..scalar(@$rh)-1) {
-            info("file $i:", $rh->[$i]->str());
+        for my $i (1..scalar(@$ra)-1) {
+            info("file $i:", $ra->[$i]->str());
             
             $equal_act++
-                if $rh->[$i]->hash() eq $rh->[0]->hash();
+                if $ra->[$i]->hash() eq $ra->[0]->hash();
         }
 
         ok( $equal_act == $equal_exp, "number of equal files with size $size ($equal_act) should be $equal_exp" );
@@ -764,8 +802,8 @@ Nr  Origin
 
 Eq           Size  Origin  Modification time    Filename
 --           ----  ------  -----------------    --------
-         92583948       1  2020-11-01 22:00:38  Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
-         92331344       2  2018-09-30 11:46:44  Music/Media.localized/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
+         92583948       1  2020-11-01 22:00:38  Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
+         92331344       2  2018-09-30 11:46:44  Music/Media.localized/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
          83094530       1  2014-10-12 13:32:30  Music/Led Zeppelin/Celebration Day [Live] [Disc 1]/1-04 In My Time Of Dying.m4a
 ==                      2  2014-10-12 13:32:30  Music/Media.localized/Music/Led Zeppelin/Celebration Day [Live] [Disc 1]/1-04 In My Time Of Dying.m4a
          79516345       1  2014-10-12 13:32:48  Music/Led Zeppelin/Celebration Day [Live] [Disc 2]/2-02 Dazed And Confused.m4a
@@ -805,8 +843,8 @@ Nr  Origin
 
 Eq           Size  Origin  Modification time    Filename
 --           ----  ------  -----------------    --------
-         92331344       1  2018-09-30 11:46:44  Music/Media.localized/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
-==                      2  2018-09-30 11:46:44  iTunes Media/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
+         92331344       1  2018-09-30 11:46:44  Music/Media.localized/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
+==                      2  2018-09-30 11:46:44  iTunes Media/Music/Johnny Hallyday/Bercy 90/2-06 Aimer vivre (Live à Bercy _ 1990).m4a
          83897684       2  2015-07-17 12:38:28  iTunes Media/Mobile Applications/Docs 1.2.8526.ipa
          83094530       1  2014-10-12 13:32:30  Music/Media.localized/Music/Led Zeppelin/Celebration Day [Live] [Disc 1]/1-04 In My Time Of Dying.m4a
 ==                      2  2014-10-12 13:32:30  iTunes Media/Music/Led Zeppelin/Celebration Day [Live] [Disc 1]/1-04 In My Time Of Dying.m4a
