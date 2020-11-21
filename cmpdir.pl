@@ -488,6 +488,21 @@ sub process_files ($) {
 
                     die "Size ($size) and/or modification time ($mtime) of $filename has changed. Original: " . $file->str()
                         unless $file->size == $size && $file->mtime eq $mtime;
+
+                    if ($equal) {
+                        # This can not be the first processed output file since the file is already in the array.
+                        # Furthermore it is not the first file with that size in the processed output file since $equal is true.
+                        # Check if the previous file has the same hash.
+                        # If not, all files with the previous hash should be updated.
+                        my $prev_file = pop(@{$files{$size}});
+
+                        if (defined($prev_file)) {
+                            push(@{$files{$size}}, $prev_file); # restore the array
+                            if ($file->hash ne $prev_file->hash) {
+                                map { $_->hash($file->hash) if $_->hash eq $prev_file->hash} @{$files{$size}};
+                            }
+                        }
+                    }
                 }
                 
                 $prev_file = $file;
@@ -733,8 +748,13 @@ sub crc32 ($;$$) {
 sub unit_test () {
     process_files('DATA');
 
-    process()
-        if $verbose > 0;
+    if ($verbose > 0) {
+        my ($verbose_old) = $verbose;
+
+        $verbose = 0;        
+        process();
+        $verbose = $verbose_old;
+    }
     
     my ($rh_folders, $rh_files) = (\%dirs, \%files);
     my @sizes = grep(!/^-/, keys %$rh_files);
@@ -764,25 +784,23 @@ sub unit_test () {
 
         ok( $file_count_act == $file_count_exp, "number of files with size $size ($file_count_act) should be $file_count_exp" );
 
-        my $equal_act = 1;
         my $equal_exp;
 
         if ( $size =~ m/^(32768|16384|5858|4877|8)$/ ) {
             $equal_exp = 1;
-        } elsif ( $size =~ m/^(82)$/ ) {
+        } elsif ( $size =~ m/^(82|74990074)$/ ) {
             $equal_exp = $file_count_act - 1;
         } else {
             $equal_exp = $file_count_act;
         }
 
-        info("file 0:", $ra->[0]->str());
+        # store the number of times a hash is found (number of times equal)
+        my %hash;
         
-        for my $i (1..scalar(@$ra)-1) {
-            info("file $i:", $ra->[$i]->str());
-            
-            $equal_act++
-                if $ra->[$i]->hash() eq $ra->[0]->hash();
-        }
+        map { $hash{$_->hash()}++ } @$ra;
+
+        # sort the values of %hash in reverse order and take the first as largest value
+        my $equal_act = (sort { $b <=> $a } values %hash)[0];
 
         ok( $equal_act == $equal_exp, "number of equal files with size $size ($equal_act) should be $equal_exp" );
     }
@@ -813,7 +831,7 @@ Eq           Size  Origin  Modification time    Filename
          75455261       1  2014-10-12 13:46:34  Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a
 ==                      2  2014-10-12 13:46:34  Music/Media.localized/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a
          74990074       1  2014-10-08 22:14:42  Music/Blue Oyster Cult/Extraterrestial/1-07 Roadhouse blues.m4a
-==                      2  2014-10-08 22:14:42  Music/Media.localized/Blue Oyster Cult/Extraterrestial/1-07 Roadhouse blues.m4a
+                        2  2014-10-08 22:14:42  Music/Media.localized/Blue Oyster Cult/Extraterrestial/1-07 Roadhouse blues.m4a
             50316       2  2020-10-26 15:48:50  Music/iTunes Music Library.xml
             32768       2  2020-09-27 15:34:17  Music/Music Library.musiclibrary/Genius.itdb
                         1  2020-11-01 10:58:21  Music/Music Library.musiclibrary/Genius.itdb
