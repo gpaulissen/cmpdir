@@ -20,6 +20,10 @@ or
 
   cmpdir.pl [GLOBAL OPTION...] analyze [analyze OPTION...] FILE...
 
+or
+
+  cmpdir.pl [GLOBAL OPTION...] consolidate [consolidate OPTION...] FILE...
+
 =head1 DESCRIPTION
 
 =head2 Compare directories
@@ -86,6 +90,20 @@ In other words when a file basename is present on all directories with the
 same size and hash and no other basename with that size is present it will NOT
 be shown. So the report does not show files that seem okay.
 
+=head2 Consolidate the compare results
+
+The fourth Use Case is to merge, analyze and consolidate the output of one or
+more comparisons.  If there is more than one file with the same basename, the
+master is copied to its siblings so the contents will be the same after the
+consolidation. If a basename is single it will be removed.
+
+This will not actually perform the actions to execute them, it will just
+output to STDOUT a Unix shell script that wil perform the actions.
+
+The master is determined by the consolidate options: date after size, oldest
+and smallest. The default is: newest first and if equal largest
+first.
+
 =head1 OPTIONS
 
 =head2 GLOBAL OPTIONS
@@ -127,6 +145,33 @@ The hash function to use (hash or crc32). Defaults to hash from the internal Per
 =item B<--threshold>
 
 Only display differences when the size is at least this number. Defaults to 0.
+
+=back
+
+=head2 consolidate OPTIONS
+
+Includes the analyze option(s) as well as the following options:
+
+=over 4
+
+=item B<--date-after-size>
+
+Use date sort after size sort, i.e. sort first by size and then by
+date.
+
+Default is first by date and then by size (preserve the original).
+
+=item B<--oldest>
+
+Use the oldest base file as master. 
+
+The default is the newest base file as master.
+
+=item B<--smallest>
+
+Use the smallest base file as master. 
+
+The default is the largest base file as master.
 
 =back
 
@@ -178,6 +223,10 @@ First version.
 
 Added merge and analyze subcommands.
 
+2020-11-28  G.J. Paulissen
+
+Added consolidate subcommand.
+
 =cut
 
 use 5.012;
@@ -224,6 +273,9 @@ my $unit_test = 0;
 my $verbose = 0;
 my $subcmd = undef;
 my $threshold = 0;
+my $date_after_size = 0; # default: date first
+my $oldest = 0;
+my $smallest = 0;
 
 # FORMATS
 
@@ -268,13 +320,15 @@ sub compare ();
 sub merge ($);
 sub process_files ($);
 sub analyze ($);
-sub print_analysis ();
+sub perform_analysis ();
+sub consolidate ($);
 sub trim ($);
 sub process_directories ();
 sub process ();
 sub info (@);
 sub quote ($);
 sub by_cmp (;$$);
+sub by_size_date ();
 sub crc32 ($;$$);
 sub unit_test ();
 
@@ -299,6 +353,8 @@ sub main ()
         merge('ARGV');
     } elsif ($subcmd eq 'analyze') {
         analyze('ARGV');        
+    } elsif ($subcmd eq 'consolidate') {
+        consolidate('ARGV');        
     }
 }
 
@@ -323,7 +379,7 @@ sub process_command_line ()
 
                    if ($arg =~ m/^-/) {
                        die "Usage error: unhandled option $arg detected in global option section";
-                   } elsif ($arg !~ m/^(compare|merge|analyze)$/) {
+                   } elsif ($arg !~ m/^(compare|merge|analyze|consolidate)$/) {
                        die "Usage error: invalid subcommand $arg";
                    } else {
                        $subcmd = $arg;
@@ -361,9 +417,17 @@ sub process_command_line ()
             pod2usage(-message => "$0: $dir is not a directory. Run with --help option.\n")
                 unless -d $dir;
         }
-    } elsif (defined($subcmd) && $subcmd eq 'analyze') {
-        GetOptions('threshold=i' => \$threshold)
-            or pod2usage(-verbose => 0);
+    } elsif (defined($subcmd) && ($subcmd eq 'analyze' or $subcmd eq 'consolidate')) {
+        if ($subcmd eq 'analyze') {
+            GetOptions('threshold=i' => \$threshold)
+                or pod2usage(-verbose => 0);
+        } else {
+            GetOptions('date-after-size' => \$date_after_size,
+                       'threshold=i' => \$threshold,
+                       'oldest' => \$oldest,
+                       'smallest' => \$smallest)
+                or pod2usage(-verbose => 0);
+        }
 
         pod2usage(-message => "$0: Threshold ($threshold) must be at least 0. Run with --help option.\n")
             unless defined($threshold) && $threshold >= 0;
@@ -513,10 +577,11 @@ sub process_files ($) {
 
 sub analyze ($) {
     process_files($_[0]);
-    print_analysis();
+    perform_analysis();
+    process();
 }
 
-sub print_analysis () {
+sub perform_analysis () {
     my @sizes = grep(!/^-/, keys %files);
     
     foreach my $size (sort { int($b) <=> int($a) } @sizes) {
@@ -546,7 +611,47 @@ sub print_analysis () {
         }
     }
 
-    process();
+}
+
+sub consolidate ($) {
+    process_files($_[0]);
+    perform_analysis();
+
+    #
+    # Store the files by basename.
+    #
+    
+    my %basenames = ();
+
+    foreach my $size (grep(!/^-/, keys %files)) {
+        foreach my $file (values @{$files{$size}}) {
+            $basenames{basename($file->filename)} = []
+                unless exists $basenames{basename($file->filename)};
+
+            push(@{$basenames{basename($file->filename)}}, $file);
+        }
+    }
+
+    # Sort the basenames by size and date
+
+    # preamble
+    printf "#!/bin/sh\nset -ex\n# threshold=%d  date_after_size=%d  smallest=%d  oldest=%d\n\n", $threshold, $date_after_size, $smallest, $oldest;
+    
+    foreach my $basename (sort { $a cmp $b } keys %basenames) {
+        my @files = sort by_size_date @{$basenames{$basename}};
+
+        for my $i (0 .. scalar(@files) - 1) {
+            printf "#  %s  %12d  \"%s\"  \n", $files[$i]->mtime, $files[$i]->size, $files[$i]->filename;
+        }
+
+        if (@files == 1) {
+            printf "rm \"%s\"\n", $files[0]->filename;
+        } else {
+            for my $i (1 .. scalar(@files) - 1) {
+                printf "cp \"%s\" \"%s\"\n", $files[0]->filename, $files[$i]->filename;
+            }
+        }
+    }
 }
 
 sub trim ($) {
@@ -711,6 +816,26 @@ sub by_cmp (;$$)
     info('compare', quote($b->filename), 'with', quote($a->filename), ': [', $retval, $cache, ']');
     
     return $retval;
+}
+
+sub by_size_date ()
+{
+    # $a and $b are implicit
+
+    my $size_cmp = ($a->size() <=> $b->size()) * ($smallest ? 1 : -1);    
+    my $mtime_cmp = ($a->mtime() cmp $b->mtime()) * ($oldest ? 1 : -1);
+
+    if (!$date_after_size) {
+        return $mtime_cmp
+            unless $mtime_cmp == 0;
+
+        return $size_cmp;
+    } else {
+        return $size_cmp
+            unless $size_cmp == 0;
+
+        return $mtime_cmp;    
+    }
 }
 
 sub crc32 ($;$$) {    
