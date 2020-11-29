@@ -6,7 +6,7 @@
 
 =head1 NAME
 
-cmpdir.pl - Compare the files in one or more directories (recursively), merge or analyze the compare STDOUT output. 
+cmpdir.pl - Compare the files in one or more directories or song locations from iTunes XML libraries (recursively), merge, analyze or consolidate the compare STDOUT output. 
 
 =head1 SYNOPSIS
 
@@ -201,6 +201,12 @@ If the file sizes and hashes are equal:
 
 =head1 EXAMPLES
 
+The following command creates a compare report ~/music.txt for an iTunes XML library:
+
+  perl -S cmpdir.pl compare "iTunes Library.xml" > ~/music.txt 
+
+It is assumed that the folder of cmpdir.pl is in the PATH (perl -S).
+
 =head1 BUGS
 
 =head1 SEE ALSO
@@ -232,6 +238,7 @@ Added consolidate subcommand.
 use 5.012;
 
 use utf8;
+use open ":std", ":encoding(UTF-8)";
 
 # use autodie; # automatically die when a system call gives an error (for example open)
 use strict;
@@ -248,7 +255,10 @@ use Getopt::Long;
 use Mac::iTunes::Library::XML;
 use POSIX qw(strftime);
 use Pod::Usage;
-use URI qw();
+
+# for uri2file
+use Encode;
+use URI::Escape;
 
 use Test::More; # do not know how many in advance
 
@@ -258,6 +268,7 @@ use MyFile;
 # VARIABLES
 
 my $program = &basename($0);
+my %xml_libraries;
 my %dirs;
 my %files;
 # each element an array reference to compare result and number of cached results
@@ -282,16 +293,16 @@ my $smallest = 0;
 
 # FORMATS
 
-my ($nr, $origin, $eq, $display_size, $mtime, $filename, $descr, $cmp, $cached);
+my ($nr, $origin, $xml_library, $eq, $display_size, $mtime, $filename, $descr, $cmp, $cached);
 
 format ORIGIN_TOP =
-Nr  Origin
---  ------
+Nr  Origin                                                        iTunes XML Library
+--  ------                                                        ------------------
 .
 
 format ORIGIN =
-@<  @*
-$nr, $origin
+@>  @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<  @*
+$nr, $origin, $xml_library
 .
 
 format FILE_TOP =
@@ -329,10 +340,12 @@ sub trim ($);
 sub process_directories_or_libraries ();
 sub process ();
 sub info (@);
+sub warning (@);
 sub quote ($);
 sub by_cmp (;$$);
 sub by_size_date ();
 sub crc32 ($;$$);
+sub uri2file ($);
 sub unit_test ();
 
 # MAIN
@@ -343,8 +356,10 @@ main();
 
 sub main () 
 {
-    binmode(STDOUT, ":utf8");
-    binmode(STDERR, ":utf8");
+#    binmode(STDOUT, "encoding(UTF-8)");
+#    binmode(STDERR, "encoding(UTF-8)");
+    #    binmode(STDOUT, ":utf8");
+    #    binmode(STDERR, ":utf8");
     
     process_command_line();
 
@@ -468,10 +483,18 @@ sub process_files ($) {
     foreach my $line (@lines) {
         chomp $line;
 
+        # old version without iTunes XML library
         if ($line eq 'Nr  Origin') {
             ;
         } elsif ($line eq '--  ------') {
             @pos = ( [0, 2], [4, undef] );
+            $part = 1;
+            @dirs = ();
+        # new version wit iTunes XML library
+        } elsif ($line eq 'Nr  Origin                                                        iTunes XML Library') {
+            ;
+        } elsif ($line eq '--  ------                                                        ------------------') {
+            @pos = ( [0, 2], [4, 60], [66, undef] );
             $part = 1;
             @dirs = ();
         } elsif ($line eq 'Eq           Size  Origin  Modification time    Filename') {
@@ -483,7 +506,7 @@ sub process_files ($) {
             ;
         } elsif ($line eq '-------                  -----  ------') {
             @pos = ();        
-        } elsif (scalar(@pos) > 0&& length($line) > 0) {
+        } elsif (scalar(@pos) > 0 && length($line) > 0) {
             info("line:", $line);
             
             my @cols = ();
@@ -506,12 +529,14 @@ sub process_files ($) {
 
             if ($part == 1) {
                 # store the origin
-                my ($index, $origin) = @cols;
+                my ($index, $origin, $xml_library) = @cols;
                 
                 $dirs[$index] = $origin;
                 
                 if (!exists($dirs{$origin})) {
                     $dirs{$origin} = (keys %dirs) + 1;
+                    $xml_libraries{$origin} = $xml_library
+                        if (defined($xml_library) && length($xml_library) > 0);
                 }
             } else {
                 my ($equal, $size, $origin, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $dirs[$cols[2]], $cols[3], $cols[4]);
@@ -553,7 +578,7 @@ sub process_files ($) {
                 } else {
                     $file = $files{'-' . $filename};
 
-                    die "Size ($size) and/or modification time ($mtime) of $filename has changed. Original: " . $file->str()
+                    die "Size ($size) and/or modification time ($mtime) of \"$filename\" has changed. Original: " . $file->str()
                         unless $file->size == $size && $file->mtime eq $mtime;
 
                     if ($equal) {
@@ -691,15 +716,24 @@ sub process_directories_or_libraries ()
             
             $origin = File::Spec->rel2abs($arg);
 
+            info("origin", quote($origin));
+
             @files = $rule->in($origin);
-        } else {
+        } else {           
             info("scanning iTunes library", quote($arg));
 
             my $library = Mac::iTunes::Library::XML->parse($arg);
 
             ($xml_library, $xml_library_mtime) = ($arg, (stat($arg))[9]);
 
-            $origin = $library->musicFolder();
+            info("music folder", quote($library->musicFolder()));
+
+            $origin = File::Spec->canonpath(uri2file($library->musicFolder()));
+
+            die "Origin \"$origin\" does not exist for iTunes XML library \"$xml_library\""
+                unless -d $origin;
+            
+            info("origin", quote($origin));
 
             # Get the hash of Items (Artist->Name->[item, item]) contained in the library.
             # Artist names are the top level keys.
@@ -711,7 +745,20 @@ sub process_directories_or_libraries ()
             while (my ($artist, $artistSongs) = each %items) {
                 while (my ($songName, $artistSongItems) = each %$artistSongs) {
                     foreach my $item (@$artistSongItems) {
-                        push(@files, URI->new($item->location())->file);
+                        my $location = $item->location();
+
+                        if (!defined($location)) {
+                            warning("artist:", $artist, "song:", quote($songName), "without location");
+                        } else {
+                            $location = uri2file($location);
+
+                            if (-f $location) {
+                                info("artist:", $artist, "song:", quote($songName), "location:", quote($location));
+                                push(@files, $location);
+                            } else {
+                                warning("artist:", $artist, "song:", quote($songName), "location:", quote($location), "does not exist");
+                            }
+                        }
                     }
                 }
             }
@@ -720,6 +767,8 @@ sub process_directories_or_libraries ()
         # store the origin
         if (!exists($dirs{$origin})) {
             $dirs{$origin} = (keys %dirs) + 1;
+            $xml_libraries{$origin} = File::Spec->rel2abs($arg)
+                if (-f $arg);
         }
         
         # preallocate the bucket
@@ -729,8 +778,8 @@ sub process_directories_or_libraries ()
         foreach my $filename (@files) {
             my ($size, $mtime) = (stat($filename))[7, 9];
 
-            die sprintf("File %s is newer than the XML library %s: please update the XML library", quote($filename), quote($xml_library))
-                if (defined($xml_library_mtime) && $mtime > $xml_library_mtime);
+            die sprintf("XML library %s should be newer than file %s: please update the XML library", quote($xml_library), quote($filename))
+                if (defined($xml_library_mtime) && $xml_library_mtime <= $mtime);
 
             # check duplicates
             if (!exists($files{'-' . $filename})) {
@@ -763,7 +812,7 @@ sub process ()
     $~ = "ORIGIN";
     
     foreach my $dir (sort { $dirs{$a} <=> $dirs{$b} } keys %dirs) {
-        ($nr, $origin) = ($dirs{$dir}, $dir);
+        ($nr, $origin, $xml_library) = ($dirs{$dir}, $dir, (exists($xml_libraries{$dir}) ? $xml_libraries{$dir} : ''));
             
         write;
     }
@@ -833,9 +882,14 @@ sub info (@)
     print STDERR "@_\n";
 }
 
+sub warning(@)
+{
+    print STDERR "WARNING: @_\n";
+}
+
 sub quote ($)
 {
-    return "\"$_[0]\"";
+    return (defined $_[0] ? "\"$_[0]\"" : 'undef');
 }
 
 sub by_cmp (;$$)
@@ -906,6 +960,18 @@ sub crc32 ($;$$) {
     return $crc;
 }
 
+sub uri2file ($) {
+    my $uri = $_[0];    
+    my $uri_unescaped = uri_unescape($uri);
+    my $uri_unescaped_utf8 = decode('utf8', $uri_unescaped);
+    my $file = substr($uri_unescaped_utf8, 0 + length('file://'));
+
+    print Data::Dumper->Dump([$uri, $uri_unescaped, $uri_unescaped_utf8, $file], [qw(uri uri_unescaped uri_unescaped_utf8 file)])
+        if ($verbose > 1);
+
+    return $file;
+}
+
 sub unit_test () {
     process_files('DATA');
 
@@ -920,7 +986,7 @@ sub unit_test () {
     my ($rh_folders, $rh_files) = (\%dirs, \%files);
     my @sizes = grep(!/^-/, keys %$rh_files);
 
-    plan tests => 2 + 2 * scalar(@sizes);
+    plan tests => 2 + 2 * scalar(@sizes) + 2;
 
     my $nr_folders_exp = 3;
     
@@ -966,6 +1032,15 @@ sub unit_test () {
         ok( $equal_act == $equal_exp, "number of equal files with size $size ($equal_act) should be $equal_exp" );
     }
 
+    my @uri_actual = ( 'file:///Volumes/Disk1/iTunes/iTunes%20Media/Music/Compilations/Working%20Class%20Hero%20-%20The%20Definitive%20Lennon%20%5BDisc%202%5D/2-11%20%239%20Dream.m4a',
+                       'file:///Volumes/Disk1/iTunes/iTunes%20Media/Music/Compilations/Les%20Anne%CC%81es%2090%20+%20Mode%20D\'Emploi%20%5BDisc%202%5D/2-01%20Cream.m4a' );
+    my @file_expected = ( '/Volumes/Disk1/iTunes/iTunes Media/Music/Compilations/Working Class Hero - The Definitive Lennon [Disc 2]/2-11 #9 Dream.m4a',
+                          '/Volumes/Disk1/iTunes/iTunes Media/Music/Compilations/Les Années 90 + Mode D\'Emploi [Disc 2]/2-01 Cream.m4a' );
+                       
+    for my $i (0 .. scalar(@uri_actual)-1) {
+        ok( uri2file($uri_actual[$i]) eq $file_expected[$i], sprintf("uri2file('%s')\noutput: '%s'\nexpected: '%s'\n", $uri_actual[$i], uri2file($uri_actual[$i]), $file_expected[$i]) );
+    }
+    
     done_testing();
 }
 
