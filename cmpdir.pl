@@ -513,8 +513,15 @@ sub process_files ($) {
 
             foreach my $pos (@pos) {
                 my ($offset, $length) = ($pos->[0], $pos->[1]);
+                my $str;
 
-                push(@cols, trim( defined($length) ? substr($line, $offset, $length) : substr($line, $offset) ));
+                if ($offset <= length($line)) {
+                    $str = defined($length) ? substr($line, $offset, $length) : substr($line, $offset);
+                } else {
+                    $str = $line;
+                }
+                
+                push(@cols, trim($str));
             }
 
             if ($verbose > 0) {
@@ -684,8 +691,14 @@ sub consolidate ($) {
 }
 
 sub trim ($) {
+    die "trim(@_) should have one argument"
+        unless scalar(@_) == 1;
+    
     my $str = shift @_;
 
+    return $str
+        unless defined($str);
+    
     $str =~ s/^\s+|\s+$//g;
 
     return $str;
@@ -848,7 +861,10 @@ sub process ()
             $eq = (defined($prev_file) && by_cmp($file, $prev_file) == 0 ? '==' : '');
 
             # strip origin from filename
-            $filename = substr($filename, length($file->origin)+1);
+            if (length($filename) >= length($file->origin) &&
+                substr($filename, 0, length($file->origin)) eq $file->origin) {
+                $filename = substr($filename, length($file->origin)+1);
+            }
         
             write;
         
