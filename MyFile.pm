@@ -35,29 +35,35 @@ sub cmp {
         $retval = $compare_results{$self}{$file};
     } elsif (exists($compare_results{$file}{$self})) {
         $retval = -$compare_results{$file}{$self};
-    } else {
+    } else {    
         $cache = 0;
-        $retval = 1 * ($self->size <=> $file->size);
 
-        if ($retval == 0) {
-            die "\$max_bytes_to_read is undefined"
-                unless (defined($max_bytes_to_read) || (defined($self->hash) && defined($file->hash)));
+        # a simple test which improves performance a lot
+        $retval = ($self->filename cmp $file->filename);
+
+        if ($retval != 0) {
+            $retval = 1 * ($self->size <=> $file->size);
+
+            if ($retval == 0) {
+                die "\$max_bytes_to_read is undefined"
+                    unless (defined($max_bytes_to_read) || (defined($self->hash) && defined($file->hash)));
             
-            if (!defined($self->hash)) {
-                $self->hash($self->calculate($r_hash_func, $max_bytes_to_read));
-            }
+                if (!defined($self->hash)) {
+                    $self->hash($self->calculate($r_hash_func, $max_bytes_to_read));
+                }
     
-            if (!defined($file->hash)) {
-                $file->hash($file->calculate($r_hash_func, $max_bytes_to_read));
-            }
+                if (!defined($file->hash)) {
+                    $file->hash($file->calculate($r_hash_func, $max_bytes_to_read));
+                }
 
-            # From both files the same number of bytes has been read
-            # so now we can deduce that if cmp returns not 0 that the files are not equal.
-            $retval = 2 * ($self->hash cmp $file->hash);
+                # From both files the same number of bytes has been read
+                # so now we can deduce that if cmp returns not 0 that the files are not equal.
+                $retval = 2 * ($self->hash cmp $file->hash);
 
-            # Only compare files in compare modus
-            if ($retval == 0 && defined($max_bytes_to_read)) {
-                $retval = 3 * (File::Compare::compare($self->filename, $file->filename) <=> 0); # something like sign
+                # Only compare files in compare modus
+                if ($retval == 0 && defined($max_bytes_to_read)) {
+                    $retval = 3 * (File::Compare::compare($self->filename, $file->filename) <=> 0); # something like sign
+                }
             }
         }
 

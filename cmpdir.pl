@@ -673,10 +673,11 @@ sub consolidate ($) {
         }
 
         if (@files == 1) {
-            printf "rm \"%s\"\n", $files[0]->filename;
+            printf("%srm \"%s\"\n", (exists($xml_libraries{$files[0]->origin}) ? '# ' : ''), $files[0]->filename);
         } else {
             for my $i (1 .. scalar(@files) - 1) {
-                printf "cp \"%s\" \"%s\"\n", $files[0]->filename, $files[$i]->filename;
+                printf("cp \"%s\" \"%s\"\n", $files[0]->filename, $files[$i]->filename)
+                    unless $files[0]->filename eq $files[$i]->filename;
             }
         }
     }
@@ -718,7 +719,7 @@ sub process_directories_or_libraries ()
 
             info("origin", quote($origin));
 
-            @files = $rule->in($origin);
+            @files = map { decode('utf8', $_); } $rule->in($origin);
         } else {           
             info("scanning iTunes library", quote($arg));
 
@@ -897,7 +898,7 @@ sub by_cmp (;$$)
     if (scalar(@_) == 2) {
         ($a, $b) = @_;
     }
-    
+
     my ($retval, $cache) = $b->cmp($a, $r_hash_func, $bytes); # reverse by using $b before $a
 
     $cmp[abs($retval)][0]++;
