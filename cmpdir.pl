@@ -10,7 +10,7 @@ cmpdir.pl - Compare the files in one or more directories (recursively), merge or
 
 =head1 SYNOPSIS
 
-  cmpdir.pl [GLOBAL OPTION...] compare [compare OPTION...] DIRECTORY...
+  cmpdir.pl [GLOBAL OPTION...] compare [compare OPTION...] [ DIRECTORY | iTunes XML library ]...
 
 or
 
@@ -241,12 +241,15 @@ use Data::Dumper;
 
 use B qw(hash); # Perl internal hash function
 use English;
-use File::Spec;
 use File::Basename;
 use File::Find::Rule;
+use File::Spec;
 use Getopt::Long;
-use Pod::Usage;
+use Mac::iTunes::Library::XML;
 use POSIX qw(strftime);
+use Pod::Usage;
+use URI qw();
+
 use Test::More; # do not know how many in advance
 
 use lib &dirname($0); # to find File::Copy::Recursive in this directory
@@ -323,7 +326,7 @@ sub analyze ($);
 sub perform_analysis ();
 sub consolidate ($);
 sub trim ($);
-sub process_directories ();
+sub process_directories_or_libraries ();
 sub process ();
 sub info (@);
 sub quote ($);
@@ -413,9 +416,9 @@ sub process_command_line ()
         pod2usage(-message => "$0: Must supply at least one directory. Run with --help option.\n")
             unless @ARGV >= 1;
 
-        foreach my $dir (@ARGV) {
-            pod2usage(-message => "$0: $dir is not a directory. Run with --help option.\n")
-                unless -d $dir;
+        foreach my $file (@ARGV) {
+            pod2usage(-message => "$0: $file is not a directory nor a file. Run with --help option.\n")
+                unless (-d $file || -f $file);
         }
     } elsif (defined($subcmd) && ($subcmd eq 'analyze' or $subcmd eq 'consolidate')) {
         if ($subcmd eq 'analyze') {
@@ -440,7 +443,7 @@ sub process_command_line ()
 }
 
 sub compare () {
-    process_directories();
+    process_directories_or_libraries();
     process();
 }
     
@@ -662,7 +665,7 @@ sub trim ($) {
     return $str;
 }
 
-sub process_directories ()
+sub process_directories_or_libraries ()
 {
     my $rule = File::Find::Rule->new;
 
@@ -677,24 +680,57 @@ sub process_directories ()
                # ignore hidden (Unix) files
                ->not_name('.?*'));
     
-    foreach my $dir (@ARGV) {
-        info("scanning directory", quote($dir));
-        
-        # store the origin
-        my $origin = File::Spec->rel2abs($dir);
+    foreach my $arg (@ARGV) {
+        my @files = ();
+        my $origin;
+        # for testing that the XML library is up to date with respect to its song files listed
+        my ($xml_library, $xml_library_mtime) = (undef, undef);
+            
+        if (-d $arg) {
+            info("scanning directory", quote($arg));
+            
+            $origin = File::Spec->rel2abs($arg);
 
+            @files = $rule->in($origin);
+        } else {
+            info("scanning iTunes library", quote($arg));
+
+            my $library = Mac::iTunes::Library::XML->parse($arg);
+
+            ($xml_library, $xml_library_mtime) = ($arg, (stat($arg))[9]);
+
+            $origin = $library->musicFolder();
+
+            # Get the hash of Items (Artist->Name->[item, item]) contained in the library.
+            # Artist names are the top level keys.
+            # Accessing one gives you a hash-ref with keys of song names and array-refs as values.
+            # Those array-refs contain Mac::iTunes::Library::Item objects.
+
+            my %items = $library->items();
+                
+            while (my ($artist, $artistSongs) = each %items) {
+                while (my ($songName, $artistSongItems) = each %$artistSongs) {
+                    foreach my $item (@$artistSongItems) {
+                        push(@files, URI->new($item->location())->file);
+                    }
+                }
+            }
+        }
+
+        # store the origin
         if (!exists($dirs{$origin})) {
             $dirs{$origin} = (keys %dirs) + 1;
-        }            
-
-        my @files = $rule->in($origin);
-
+        }
+        
         # preallocate the bucket
         # %files will contain every file (prefixed with -) and every size (never negative)
         keys %files = scalar(keys %files) + 2 * scalar(@files);
 
         foreach my $filename (@files) {
             my ($size, $mtime) = (stat($filename))[7, 9];
+
+            die sprintf("File %s is newer than the XML library %s: please update the XML library", quote($filename), quote($xml_library))
+                if (defined($xml_library_mtime) && $mtime > $xml_library_mtime);
 
             # check duplicates
             if (!exists($files{'-' . $filename})) {
@@ -706,7 +742,7 @@ sub process_directories ()
                     unless exists $files{$size};
 
                 push(@{$files{$size}}, $file);
-            
+                
                 info("added file", quote($filename));
             }
         }
