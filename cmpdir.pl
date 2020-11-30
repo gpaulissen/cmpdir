@@ -268,8 +268,9 @@ use MyFile;
 # VARIABLES
 
 my $program = &basename($0);
-my %xml_libraries;
-my %dirs;
+# When an iTunes XML library has been processed: the music folder, a newline and the library,
+# otherwise the directory processed (no newline).
+my @dirs;
 my %files;
 # each element an array reference to compare result and number of cached results
 my @cmp = ( [0, 0], [0, 0], [0, 0], [0, 0] );
@@ -346,6 +347,9 @@ sub by_cmp (;$$);
 sub by_size_date ();
 sub crc32 ($;$$);
 sub uri2file ($);
+sub origin_plus_xml_library ($$);
+sub lookup_origin_plus_xml_library ($;$);
+sub is_music_folder ($);
 sub unit_test ();
 
 # MAIN
@@ -472,7 +476,7 @@ sub process_files ($) {
     my @pos = ();
     my $part = undef;
     my $prev_file;
-    my @dirs;
+    my @origins;
 
     my @lines = <$fh>; # slurp
 
@@ -489,14 +493,14 @@ sub process_files ($) {
         } elsif ($line eq '--  ------') {
             @pos = ( [0, 2], [4, undef] );
             $part = 1;
-            @dirs = ();
+            @origins = ();
         # new version wit iTunes XML library
         } elsif ($line eq 'Nr  Origin                                                        iTunes XML Library') {
             ;
         } elsif ($line eq '--  ------                                                        ------------------') {
             @pos = ( [0, 2], [4, 60], [66, undef] );
             $part = 1;
-            @dirs = ();
+            @origins = ();
         } elsif ($line eq 'Eq           Size  Origin  Modification time    Filename') {
             ;
         } elsif ($line eq '--           ----  ------  -----------------    --------') {
@@ -513,15 +517,14 @@ sub process_files ($) {
 
             foreach my $pos (@pos) {
                 my ($offset, $length) = ($pos->[0], $pos->[1]);
-                my $str;
 
                 if ($offset <= length($line)) {
-                    $str = defined($length) ? substr($line, $offset, $length) : substr($line, $offset);
+                    my $str = defined($length) ? substr($line, $offset, $length) : substr($line, $offset);
+                    
+                    push(@cols, trim($str));
                 } else {
-                    $str = $line;
+                    push(@cols, '');
                 }
-                
-                push(@cols, trim($str));
             }
 
             if ($verbose > 0) {
@@ -538,15 +541,13 @@ sub process_files ($) {
                 # store the origin
                 my ($index, $origin, $xml_library) = @cols;
                 
-                $dirs[$index] = $origin;
-                
-                if (!exists($dirs{$origin})) {
-                    $dirs{$origin} = (keys %dirs) + 1;
-                    $xml_libraries{$origin} = $xml_library
-                        if (defined($xml_library) && length($xml_library) > 0);
+                $origins[$index] = $origin;
+
+                if (!lookup_origin_plus_xml_library($origin, $xml_library)) {
+                    push(@dirs, origin_plus_xml_library($origin, $xml_library));
                 }
             } else {
-                my ($equal, $size, $origin, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $dirs[$cols[2]], $cols[3], $cols[4]);
+                my ($equal, $size, $origin, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $origins[$cols[2]], $cols[3], $cols[4]);
                 my $file;
 
                 if ($size eq '') {
@@ -640,7 +641,7 @@ sub perform_analysis () {
             # 2) the number of files is equal to the directory count AND
             # 3) every file has a different origin
             
-            if ($equal == $file_count && $file_count == scalar(keys %dirs) && $file_count == scalar(keys %dirs_found)) {
+            if ($equal == $file_count && $file_count == scalar(@dirs) && $file_count == scalar(keys %dirs_found)) {
                 delete $files{$size};
             }
         }
@@ -680,7 +681,8 @@ sub consolidate ($) {
         }
 
         if (@files == 1) {
-            printf("%srm \"%s\"\n", (exists($xml_libraries{$files[0]->origin}) ? '# ' : ''), $files[0]->filename);
+            # comment a remove when the origin is a music folder from an iTunes XML library 
+            printf("%srm \"%s\"\n", (is_music_folder($files[0]->origin) ? '# ' : ''), $files[0]->filename);
         } else {
             for my $i (1 .. scalar(@files) - 1) {
                 printf("cp \"%s\" \"%s\"\n", $files[0]->filename, $files[$i]->filename)
@@ -723,7 +725,7 @@ sub process_directories_or_libraries ()
         my @files = ();
         my $origin;
         # for testing that the XML library is up to date with respect to its song files listed
-        my ($xml_library, $xml_library_mtime) = (undef, undef);
+        my ($xml_library, $xml_library_mtime) = ('', undef);
             
         if (-d $arg) {
             info("scanning directory", quote($arg));
@@ -738,7 +740,7 @@ sub process_directories_or_libraries ()
 
             my $library = Mac::iTunes::Library::XML->parse($arg);
 
-            ($xml_library, $xml_library_mtime) = ($arg, (stat($arg))[9]);
+            ($xml_library, $xml_library_mtime) = (File::Spec->rel2abs($arg), (stat($arg))[9]);
 
             info("music folder", quote($library->musicFolder()));
 
@@ -779,10 +781,8 @@ sub process_directories_or_libraries ()
         }
 
         # store the origin
-        if (!exists($dirs{$origin})) {
-            $dirs{$origin} = (keys %dirs) + 1;
-            $xml_libraries{$origin} = File::Spec->rel2abs($arg)
-                if (-f $arg);
+        if (!lookup_origin_plus_xml_library($origin, $xml_library)) {
+            push(@dirs, origin_plus_xml_library($origin, $xml_library));
         }
         
         # preallocate the bucket
@@ -825,8 +825,8 @@ sub process ()
     $^ = "ORIGIN_TOP";
     $~ = "ORIGIN";
     
-    foreach my $dir (sort { $dirs{$a} <=> $dirs{$b} } keys %dirs) {
-        ($nr, $origin, $xml_library) = ($dirs{$dir}, $dir, (exists($xml_libraries{$dir}) ? $xml_libraries{$dir} : ''));
+    for my $i (0 .. scalar(@dirs)-1) {
+        ($nr, $origin, $xml_library) = ($i + 1, split("\n", $dirs[$i]));
             
         write;
     }
@@ -856,7 +856,7 @@ sub process ()
         foreach my $file (sort by_cmp values @{$files{$size}}) {
             info("display file", ++$file_nr, "/", $nr_files);
         
-            ($origin, $filename, $mtime) = ($dirs{$file->origin}, $file->filename, $file->mtime);
+            ($origin, $filename, $mtime) = (lookup_origin_plus_xml_library($file->origin), $file->filename, $file->mtime);
 
             $eq = (defined($prev_file) && by_cmp($file, $prev_file) == 0 ? '==' : '');
 
@@ -989,6 +989,39 @@ sub uri2file ($) {
     return $file;
 }
 
+sub origin_plus_xml_library ($$) {
+    my ($origin, $xml_library) = @_;
+
+    $xml_library = ''
+        unless defined($xml_library);
+
+    return sprintf("%s%s%s", $origin, ($xml_library ne '' ? "\n" : ""), $xml_library);
+}
+    
+sub lookup_origin_plus_xml_library ($;$) {
+    my $origin_plus_xml_library;
+    
+    if (@_ == 1) {
+        $origin_plus_xml_library = $_[0];
+    } else {
+        $origin_plus_xml_library = origin_plus_xml_library($_[0], $_[1]);        
+    }
+
+    for my $i (0 .. scalar(@dirs)) {
+        return $i + 1
+            if ($dirs[$i] eq $origin_plus_xml_library);
+    }
+
+    return 0;
+}                
+
+sub is_music_folder ($) {
+    my ($origin) = @_;
+    my @found = grep { (split(/\n/, $_))[0] eq $origin } @dirs;
+
+    return scalar(@found) != 0;
+}
+    
 sub unit_test () {
     process_files('DATA');
 
@@ -1000,14 +1033,14 @@ sub unit_test () {
         $verbose = $verbose_old;
     }
     
-    my ($rh_folders, $rh_files) = (\%dirs, \%files);
+    my ($ra_folders, $rh_files) = (\@dirs, \%files);
     my @sizes = grep(!/^-/, keys %$rh_files);
 
     plan tests => 2 + 2 * scalar(@sizes) + 2;
 
     my $nr_folders_exp = 3;
     
-    ok( keys %$rh_folders == $nr_folders_exp, "number of folders should be $nr_folders_exp" );
+    ok( @$ra_folders == $nr_folders_exp, "number of folders should be $nr_folders_exp" );
 
     my $nr_file_sizes_exp = 19;
 
