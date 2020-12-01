@@ -357,6 +357,7 @@ sub uri2file ($);
 sub lookup_or_add_origin ($$);
 sub is_music_folder ($);
 sub strip_directory ($);
+sub add_file ($);
 sub unit_test ();
 
 # MAIN
@@ -599,14 +600,7 @@ sub process_files ($) {
                     if (!($filename =~ m/$name_regexp/o)) {
                         warning("file", quote($filename), "does not match", $name_regexp);
                     } else {
-                        $files{$size} = []
-                            unless exists $files{$size};
-
-                        $files{'-' . $filename} = $file;
-                        
-                        push(@{$files{$size}}, $file);
-                        
-                        info("added file", quote($filename), 'with hash', $file->hash);
+                        add_file($file);
                     }
                 } else {
                     # filename exists so it matches $name_regexp
@@ -829,15 +823,8 @@ sub process_directories_or_libraries ()
             # check duplicates
             if (!exists($files{'-' . $filename})) {
                 my $file = MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin_nr => $origin_nr);
-                
-                $files{'-' . $filename} = $file;
-                
-                $files{$size} = []
-                    unless exists $files{$size};
 
-                push(@{$files{$size}}, $file);
-                
-                info("added file", quote($filename));
+                add_file($file);
             }
         }
     }
@@ -1019,15 +1006,24 @@ sub uri2file ($) {
 
 sub lookup_or_add_origin ($$) {
     my ($dir, $xml_library) = @_;
-    
+    my $found = undef;
+
+    info("adding directory", quote($dir), 'and XML library', $xml_library);
+
     for my $i (0 .. $#origins) {
-        return $i
+        $found = $i
             if ($origins[$i]->[0] eq $dir && $origins[$i]->[1] eq $xml_library);
     }
 
-    push(@origins, [$dir, $xml_library]);
-
-    return $#origins;
+    if ($found) {
+        info("found at origin", $found);        
+    } else {
+        push(@origins, [$dir, $xml_library]);
+        
+        $found = $#origins;
+        info("added at origin", $found);        
+    }
+    return $found;
 }                
 
 sub is_music_folder ($) {
@@ -1041,9 +1037,22 @@ sub strip_directory ($) {
     my $dir = $origins[$file->origin_nr()]->[0];
     my $filename = $file->filename();
     
-    $filename =~ s!^$dir!!;
+    $filename =~ s!^$dir(\/|\\)?!!;
 
     return $filename;
+}
+
+sub add_file ($) {
+    my $file = shift @_;
+    
+    $files{$file->size} = []
+        unless exists $files{$file->size};
+
+    $files{'-' . $file->filename} = $file;
+                        
+    push(@{$files{$file->size}}, $file);
+                        
+    info("added file", quote($file->filename), 'with size', $file->size);
 }
 
 sub unit_test () {
@@ -1071,7 +1080,7 @@ sub unit_test () {
     
     my @sizes = grep(!/^-/, keys %files);
 
-    plan tests => 2 + 2 * scalar(@sizes) + 2;
+    plan tests => 2 + 2 * scalar(@sizes) + 2 + 1;
 
     my $nr_folders_exp = 3;
     
@@ -1126,6 +1135,12 @@ sub unit_test () {
         ok( uri2file($uri_actual[$i]) eq $file_expected[$i], sprintf("uri2file('%s')\noutput: '%s'\nexpected: '%s'\n", $uri_actual[$i], uri2file($uri_actual[$i]), $file_expected[$i]) );
     }
 
+    my $filename = '/Volumes/Disk1/iTunes/iTunes Media/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a';
+    my $file = $files{"-$filename"};                                        
+    my $filename_stripped = 'iTunes Media/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a';
+    
+    ok( strip_directory($file) eq $filename_stripped, sprintf("strip origin of '%s' should be '$filename_stripped'", $file->filename()) );
+    
     done_testing();
 }
 
