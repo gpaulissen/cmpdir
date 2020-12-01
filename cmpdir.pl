@@ -114,6 +114,10 @@ first.
 
 This help.
 
+=item B<--name-regexp>
+
+The file names should match this regular expression. Defaults to ".+".
+
 =item B<--unit-test>
 
 Perform a unit test.
@@ -271,27 +275,28 @@ my $program = &basename($0);
 # An origin is a reference to an array of
 # A) the music folder and the library when an iTunes XML library has been processed OR
 # B) the directory processed and the empty string (no iTunes XML library).
+
+
+# The variables are set by init() so it can be reset in unit_test().
 my @origins;
 my %files;
 # each element an array reference to compare result and number of cached results
-my @cmp = ( [0, 0], [0, 0], [0, 0], [0, 0] );
-my @descr = ( '==             ',
-              '!= size        ',
-              '!= hash        ',
-              '!= file compare'
-            );
+my @cmp;
+my @descr;
+
 
 # command line options
 
 my $bytes = undef;
+my $date_after_size = 0; # default: date first
+my $name_regexp = '.+';
+my $oldest = 0;
 my $r_hash_func = 'hash';
-my $unit_test = 0;
-my $verbose = 0;
+my $smallest = 0;
 my $subcmd = undef;
 my $threshold = 0;
-my $date_after_size = 0; # default: date first
-my $oldest = 0;
-my $smallest = 0;
+my $unit_test = 0;
+my $verbose = 0;
 
 # FORMATS
 
@@ -331,6 +336,7 @@ $descr, $cmp, $cached
 # PROTOTYPES
 
 sub main ();
+sub init ();
 sub process_command_line ();
 sub compare ();
 sub merge ($);
@@ -361,10 +367,7 @@ main();
 
 sub main () 
 {
-#    binmode(STDOUT, "encoding(UTF-8)");
-#    binmode(STDERR, "encoding(UTF-8)");
-    #    binmode(STDOUT, ":utf8");
-    #    binmode(STDERR, ":utf8");
+    init();
     
     process_command_line();
 
@@ -381,6 +384,17 @@ sub main ()
     }
 }
 
+sub init () {
+    @origins = ();
+    %files = ();
+    @cmp = ( [0, 0], [0, 0], [0, 0], [0, 0] );
+    @descr = ( '==             ',
+               '!= size        ',
+               '!= hash        ',
+               '!= file compare'
+             );
+}
+    
 sub process_command_line ()
 {
     # Windows FTYPE and ASSOC cause the command 'generate_ddl -h -c file'
@@ -395,6 +409,7 @@ sub process_command_line ()
 
     #
     GetOptions('help' => sub { pod2usage(-verbose => 2) },
+               'name-regexp=s' => \$name_regexp,
                'unit-test' => \$unit_test,
                'verbose+' => \$verbose,
                '<>' => sub {
@@ -441,12 +456,14 @@ sub process_command_line ()
                 unless (-d $file || -f $file);
         }
     } elsif (defined($subcmd) && ($subcmd eq 'analyze' or $subcmd eq 'consolidate')) {
+        my %common_suboptions = ('threshold=i' => \$threshold);
+        
         if ($subcmd eq 'analyze') {
-            GetOptions('threshold=i' => \$threshold)
+            GetOptions(%common_suboptions)
                 or pod2usage(-verbose => 0);
         } else {
-            GetOptions('date-after-size' => \$date_after_size,
-                       'threshold=i' => \$threshold,
+            GetOptions(%common_suboptions,
+                       'date-after-size' => \$date_after_size,
                        'oldest' => \$oldest,
                        'smallest' => \$smallest)
                 or pod2usage(-verbose => 0);
@@ -539,6 +556,9 @@ sub process_files ($) {
             if ($part == 1) {
                 # store the origin
                 my ($index, $dir, $xml_library) = @cols;
+
+                $xml_library = ''
+                    unless defined($xml_library);
                 
                 $origin_nrs[$index] = lookup_or_add_origin($dir, $xml_library);
 
@@ -553,7 +573,7 @@ sub process_files ($) {
                 }
 
                 $filename = $origins[$origin_nr]->[0] . "/$filename";
-                
+
                 # check duplicates
                 if (!exists($files{'-' . $filename})) {
                     my $hash;
@@ -572,16 +592,25 @@ sub process_files ($) {
 
                     die "\$file->hash undefined"
                         unless defined($file->hash);
-                    
-                    $files{$size} = []
-                        unless exists $files{$size};
 
-                    $files{'-' . $filename} = $file;
+                    # GJP 2020-12-01 
+                    # Do not store the filename in $files{$size} but create the object so it can be assigned to $prev_file below.
                     
-                    push(@{$files{$size}}, $file);
-                    
-                    info("added file", quote($filename), 'with hash', $file->hash);
+                    if (!($filename =~ m/$name_regexp/o)) {
+                        warning("file", quote($filename), "does not match", $name_regexp);
+                    } else {
+                        $files{$size} = []
+                            unless exists $files{$size};
+
+                        $files{'-' . $filename} = $file;
+                        
+                        push(@{$files{$size}}, $file);
+                        
+                        info("added file", quote($filename), 'with hash', $file->hash);
+                    }
                 } else {
+                    # filename exists so it matches $name_regexp
+                    
                     $file = $files{'-' . $filename};
 
                     die "Size ($size) and/or modification time ($mtime) of \"$filename\" has changed. Original: " . $file->str()
@@ -720,7 +749,8 @@ sub process_directories_or_libraries ()
              , $rule->new
                ->file
                # ignore hidden (Unix) files
-               ->not_name('.?*'));
+               ->not_name('.?*')
+               ->name(qr/$name_regexp/));
     
     foreach my $arg (@ARGV) {
         my @files = ();
@@ -769,11 +799,13 @@ sub process_directories_or_libraries ()
                         } else {
                             $location = uri2file($location);
 
-                            if (-f $location) {
+                            if (!($location =~ m/$name_regexp/o)) {
+                                warning("artist:", $artist, "song:", quote($songName), "location:", quote($location), "does not match", $name_regexp);
+                            } elsif (!(-f $location)) {
+                                warning("artist:", $artist, "song:", quote($songName), "location:", quote($location), "does not exist");
+                            } else {
                                 info("artist:", $artist, "song:", quote($songName), "location:", quote($location));
                                 push(@files, $location);
-                            } else {
-                                warning("artist:", $artist, "song:", quote($songName), "location:", quote($location), "does not exist");
                             }
                         }
                     }
@@ -1015,6 +1047,18 @@ sub strip_directory ($) {
 }
 
 sub unit_test () {
+    $name_regexp = 'Music';
+
+    # Setting the name regular expression will skip these files:
+    #
+    # WARNING: file "/Volumes/Disk1/iTunes/iTunes Media/Mobile Applications/Docs 1.2.8526.ipa" does not match Music
+    # WARNING: file "/Volumes/Disk1/iTunes/iTunes Library Genius.itdb" does not match Music
+    # WARNING: file "/Volumes/Disk1/iTunes/iTunes Library Extras.itdb" does not match Music
+    # WARNING: file "/Volumes/Disk1/iTunes/iTunes Library.itl.bak" does not match Music
+    # WARNING: file "/Volumes/Disk1/iTunes/Previous iTunes Libraries/iTunes Library 2015-07-17.itl" does not match Music
+    # WARNING: file "/Volumes/Disk1/iTunes/sentinel" does not match Music
+    #
+    
     process_files('DATA');
 
     if ($verbose > 0) {
@@ -1033,7 +1077,7 @@ sub unit_test () {
     
     ok( @origins == $nr_folders_exp, "number of folders should be $nr_folders_exp" );
 
-    my $nr_file_sizes_exp = 19;
+    my $nr_file_sizes_exp = 16;
 
     ok( @sizes == $nr_file_sizes_exp, 'number of file sizes ' . scalar(@sizes) . " should be $nr_file_sizes_exp" );
 
@@ -1044,7 +1088,7 @@ sub unit_test () {
 
         if ( $size =~ m/^(92583948|83897684|50316|5858|5281|4877|4485|1193|1047)$/ ) {
             $file_count_exp = 1;
-        } elsif ( $size =~ m/^(83094530|79516345|75972781|75455261|74990074|32768|16384|8)$/ ) {
+        } elsif ( $size =~ m/^(83094530|79516345|75972781|75455261|74990074)$/ ) {
             $file_count_exp = 3;
         } else {
             $file_count_exp = 2;
@@ -1081,7 +1125,7 @@ sub unit_test () {
     for my $i (0 .. scalar(@uri_actual)-1) {
         ok( uri2file($uri_actual[$i]) eq $file_expected[$i], sprintf("uri2file('%s')\noutput: '%s'\nexpected: '%s'\n", $uri_actual[$i], uri2file($uri_actual[$i]), $file_expected[$i]) );
     }
-    
+
     done_testing();
 }
 
