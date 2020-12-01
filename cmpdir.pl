@@ -355,7 +355,7 @@ sub by_cmp (;$$);
 sub by_size_date ();
 sub crc32 ($;$$);
 sub uri2file ($);
-sub lookup_or_add_origin ($$); # returns >= 0
+sub lookup_or_add_origin ($$); # returns >= 1
 sub get_origin ($$);
 sub is_music_folder ($);
 sub strip_directory ($);
@@ -568,7 +568,7 @@ sub process_files ($) {
                 info("index:", $index, "; dir:", $dir, "; xml_library:", $xml_library, "; origin_nr:", $origin_nrs[$index]);
 
             } else {
-                my ($equal, $size, $origin_nr, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $origin_nrs[$cols[2]]+1, $cols[3], $cols[4]);
+                my ($equal, $size, $origin_nr, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $origin_nrs[$cols[2]], $cols[3], $cols[4]);
                 my $file;
 
                 if ($size eq '') {
@@ -1026,6 +1026,11 @@ sub lookup_or_add_origin ($$) {
         info("added at origin", $found);        
     }
 
+    ++$found;
+    
+    croak("found ($found) must be between 1 and " . scalar(@origins))
+        unless $found >= 1 && $found <= @origins;
+
     return $found;
 }                
 
@@ -1160,11 +1165,11 @@ sub unit_test () {
     
     my $origin_nr = lookup_or_add_origin('abc', '');
 
-    ok($origin_nr == 0, "first add ($origin_nr) should return 0");
+    ok($origin_nr == 1, "first add ($origin_nr) should return 1");
 
     $origin_nr = lookup_or_add_origin('abc', '');
     
-    ok($origin_nr == 0, "next lookup ($origin_nr) should also return 0");
+    ok($origin_nr == 1, "next lookup ($origin_nr) should also return 1");
         
     done_testing();
 }
