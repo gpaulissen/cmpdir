@@ -251,6 +251,7 @@ use warnings;
 use Data::Dumper;
 
 use B qw(hash); # Perl internal hash function
+use Carp;
 use English;
 use File::Basename;
 use File::Find::Rule;
@@ -354,7 +355,8 @@ sub by_cmp (;$$);
 sub by_size_date ();
 sub crc32 ($;$$);
 sub uri2file ($);
-sub lookup_or_add_origin ($$);
+sub lookup_or_add_origin ($$); # returns >= 0
+sub get_origin ($$);
 sub is_music_folder ($);
 sub strip_directory ($);
 sub add_file ($);
@@ -566,14 +568,14 @@ sub process_files ($) {
                 info("index:", $index, "; dir:", $dir, "; xml_library:", $xml_library, "; origin_nr:", $origin_nrs[$index]);
 
             } else {
-                my ($equal, $size, $origin_nr, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $origin_nrs[$cols[2]], $cols[3], $cols[4]);
+                my ($equal, $size, $origin_nr, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $origin_nrs[$cols[2]]+1, $cols[3], $cols[4]);
                 my $file;
 
                 if ($size eq '') {
                     $size = $prev_file->size;
                 }
 
-                $filename = $origins[$origin_nr]->[0] . "/$filename";
+                $filename = get_origin($origin_nr, 0) . "/$filename";
 
                 # check duplicates
                 if (!exists($files{'-' . $filename})) {
@@ -649,11 +651,11 @@ sub perform_analysis () {
             my $file_count = scalar(@$ra);
             my $equal = 1;
             # construct a string containing the directory and XML library separated by a newline.
-            my $dir_xml_library = join("\n", $origins[$ra->[0]->origin_nr]->[0], $origins[$ra->[0]->origin_nr]->[1]);
+            my $dir_xml_library = join("\n", get_origin($ra->[0]->origin_nr, 0), get_origin($ra->[0]->origin_nr, 1));
             my %origins_found = ( $dir_xml_library => 1 );
             
             for my $i (1..scalar(@$ra)-1) {
-                $dir_xml_library = join("\n", $origins[$ra->[$i]->origin_nr]->[0], $origins[$ra->[$i]->origin_nr]->[1]);
+                $dir_xml_library = join("\n", get_origin($ra->[$i]->origin_nr, 0), get_origin($ra->[$i]->origin_nr, 1));
                 $origins_found{$dir_xml_library} = 1;
                 $equal++
                     if $ra->[$i]->hash() eq $ra->[0]->hash() && basename($ra->[$i]->filename) eq basename($ra->[0]->filename);
@@ -844,7 +846,7 @@ sub process ()
     $~ = "ORIGIN";
     
     for my $i (0 .. $#origins) {
-        ($nr, $dir, $xml_library) = ($i + 1, $origins[$i]->[0], $origins[$i]->[1]);
+        ($nr, $dir, $xml_library) = ($i + 1, get_origin($i + 1, 0), get_origin($i + 1, 1));
             
         write;
     }
@@ -1015,7 +1017,7 @@ sub lookup_or_add_origin ($$) {
             if ($origins[$i]->[0] eq $dir && $origins[$i]->[1] eq $xml_library);
     }
 
-    if ($found) {
+    if (defined($found)) {
         info("found at origin", $found);        
     } else {
         push(@origins, [$dir, $xml_library]);
@@ -1023,18 +1025,31 @@ sub lookup_or_add_origin ($$) {
         $found = $#origins;
         info("added at origin", $found);        
     }
+
     return $found;
+}                
+
+sub get_origin ($$) {
+    my ($origin_nr, $idx) = @_;
+
+    croak("origin ($origin_nr) must be between 1 and " . scalar(@origins))
+        unless $origin_nr >= 1 && $origin_nr <= @origins;
+
+    croak("index ($idx) must be 0 or 1")
+        unless $idx == 0 || $idx == 1;
+    
+    return $origins[$origin_nr - 1]->[$idx];
 }                
 
 sub is_music_folder ($) {
     my $origin_nr = shift @_;
     
-    return length($origins[$origin_nr]->[1]) > 0;
+    return length(get_origin($origin_nr, 1)) > 0;
 }
 
 sub strip_directory ($) {
     my $file = shift @_;
-    my $dir = $origins[$file->origin_nr()]->[0];
+    my $dir = get_origin($file->origin_nr(), 0);
     my $filename = $file->filename();
     
     $filename =~ s!^$dir(\/|\\)?!!;
@@ -1080,7 +1095,7 @@ sub unit_test () {
     
     my @sizes = grep(!/^-/, keys %files);
 
-    plan tests => 2 + 2 * scalar(@sizes) + 2 + 1;
+    plan tests => 2 + 2 * scalar(@sizes) + 2 + 1 + 2;
 
     my $nr_folders_exp = 3;
     
@@ -1140,7 +1155,17 @@ sub unit_test () {
     my $filename_stripped = 'iTunes Media/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a';
     
     ok( strip_directory($file) eq $filename_stripped, sprintf("strip origin of '%s' should be '$filename_stripped'", $file->filename()) );
+
+    @origins = ();
     
+    my $origin_nr = lookup_or_add_origin('abc', '');
+
+    ok($origin_nr == 0, "first add ($origin_nr) should return 0");
+
+    $origin_nr = lookup_or_add_origin('abc', '');
+    
+    ok($origin_nr == 0, "next lookup ($origin_nr) should also return 0");
+        
     done_testing();
 }
 
