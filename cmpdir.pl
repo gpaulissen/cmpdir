@@ -500,7 +500,7 @@ sub process_files ($) {
     my @pos = ();
     my $part = undef;
     my $prev_file;
-    my @origin_nrs;
+    my @local2global;
 
     my @lines = <$fh>; # slurp
 
@@ -566,12 +566,12 @@ sub process_files ($) {
                 $xml_library = ''
                     unless defined($xml_library);
                 
-                $origin_nrs[$index] = lookup_or_add_origin($dir, $xml_library);
+                $local2global[$index] = lookup_or_add_origin($dir, $xml_library);
 
-                info("index:", $index, "; dir:", $dir, "; xml_library:", $xml_library, "; origin_nr:", $origin_nrs[$index]);
+                info("index:", $index, "; dir:", $dir, "; xml_library:", $xml_library, "; origin_nr:", $local2global[$index]);
 
             } else {
-                my ($equal, $size, $origin_nr, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $origin_nrs[$cols[2]], $cols[3], $cols[4]);
+                my ($equal, $size, $origin_nr, $mtime, $filename) = (($cols[0] eq '=='), $cols[1], $local2global[$cols[2]], $cols[3], $cols[4]);
                 my $file;
 
                 if ($size eq '') {
@@ -580,8 +580,15 @@ sub process_files ($) {
 
                 $filename = get_origin($origin_nr, 0) . "/$filename";
 
+                # TBD
+                # ---
                 # check duplicates
-                $file = find_file($filename);
+                # Three cases:
+                # 1) filename never processed
+                # 2) filename processed before but for a different origin (maybe from another compare file)
+                # 3) filename processed before but for the same different origin (maybe from another compare file)
+                
+                $file = find_file($filename); # file found anywhere
                 
                 if (!defined($file)) {
                     my $hash;
@@ -826,10 +833,8 @@ sub process_directories_or_libraries ()
                 if (defined($xml_library_mtime) && $xml_library_mtime <= $mtime);
 
             # check duplicates
-            if (!defined(find_file($filename))) {
-                my $file = MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin_nr => $origin_nr);
-
-                add_file($file);
+            if (!defined(find_file($filename, $origin_nr))) {
+                add_file(MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin_nr => $origin_nr));
             }
         }
     }
@@ -864,7 +869,7 @@ sub process ()
     $^ = "FILE_TOP";
     $~ = "FILE";
 
-    my ($file_nr, $nr_files) = (0, get_file_names());
+    my ($file_nr, $nr_files) = (0, scalar(get_file_names()));
     
     # just print one page by setting page length large enough
     $= = 2 + $nr_files;
@@ -1090,7 +1095,7 @@ sub get_file_sizes () {
 }
     
 sub get_file_names () {
-    return grep(/^-/, keys %files);
+    return map { substr($_, 1) } grep(/^-/, keys %files);
 }
 
 
