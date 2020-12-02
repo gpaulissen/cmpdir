@@ -359,7 +359,10 @@ sub lookup_or_add_origin ($$); # returns >= 1
 sub get_origin ($$);
 sub is_music_folder ($);
 sub strip_directory ($);
+sub find_file ($;$);
 sub add_file ($);
+sub get_file_sizes ();
+sub get_file_names ();
 sub unit_test ();
 
 # MAIN
@@ -578,7 +581,9 @@ sub process_files ($) {
                 $filename = get_origin($origin_nr, 0) . "/$filename";
 
                 # check duplicates
-                if (!exists($files{'-' . $filename})) {
+                $file = find_file($filename);
+                
+                if (!defined($file)) {
                     my $hash;
                     
                     # take the hash of the predecessor if the files are equal
@@ -606,8 +611,6 @@ sub process_files ($) {
                     }
                 } else {
                     # filename exists so it matches $name_regexp
-                    
-                    $file = $files{'-' . $filename};
 
                     die "Size ($size) and/or modification time ($mtime) of \"$filename\" has changed. Original: " . $file->str()
                         unless $file->size == $size && $file->mtime eq $mtime;
@@ -632,7 +635,7 @@ sub process_files ($) {
             }
         }
     }
-}
+} # process_files
 
 sub analyze ($) {
     process_files($_[0]);
@@ -641,7 +644,7 @@ sub analyze ($) {
 }
 
 sub perform_analysis () {
-    my @sizes = grep(!/^-/, keys %files);
+    my @sizes = get_file_sizes();
     
     foreach my $size (sort { int($b) <=> int($a) } @sizes) {
         if ($size < $threshold) {
@@ -685,7 +688,7 @@ sub consolidate ($) {
     
     my %basenames = ();
 
-    foreach my $size (grep(!/^-/, keys %files)) {
+    foreach my $size (get_file_sizes()) {
         foreach my $file (values @{$files{$size}}) {
             $basenames{basename($file->filename)} = []
                 unless exists $basenames{basename($file->filename)};
@@ -823,14 +826,14 @@ sub process_directories_or_libraries ()
                 if (defined($xml_library_mtime) && $xml_library_mtime <= $mtime);
 
             # check duplicates
-            if (!exists($files{'-' . $filename})) {
+            if (!defined(find_file($filename))) {
                 my $file = MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin_nr => $origin_nr);
 
                 add_file($file);
             }
         }
     }
-}
+} # process_directories_or_libraries
 
 sub process ()
 {
@@ -861,14 +864,14 @@ sub process ()
     $^ = "FILE_TOP";
     $~ = "FILE";
 
-    my ($file_nr, $nr_files) = (0, scalar(grep(/^-/, keys %files)));
+    my ($file_nr, $nr_files) = (0, get_file_names());
     
     # just print one page by setting page length large enough
     $= = 2 + $nr_files;
 
     # reverse size by using $b before $a
     # skip the filename items
-    foreach my $size (sort { $b <=> $a } grep(!/^-/, keys %files)) {
+    foreach my $size (sort { $b <=> $a } get_file_sizes()) {
         $display_size = $size;
 
         my $prev_file = undef;
@@ -1062,18 +1065,34 @@ sub strip_directory ($) {
     return $filename;
 }
 
+sub find_file ($;$) {
+    my ($filename, $origin_nr) = @_;
+    my $key = (defined($origin_nr) ? "$origin_nr" : '') . '-' . $filename;
+
+    return exists($files{$key}) ? $files{$key} : undef;
+}
+
 sub add_file ($) {
     my $file = shift @_;
     
     $files{$file->size} = []
         unless exists $files{$file->size};
 
-    $files{'-' . $file->filename} = $file;
+    $files{'-' . $file->filename} = $files{$file->origin_nr . '-' . $file->filename} = $file;
                         
     push(@{$files{$file->size}}, $file);
                         
     info("added file", quote($file->filename), 'with size', $file->size);
 }
+
+sub get_file_sizes () {
+    return grep(!/-/, keys %files);
+}
+    
+sub get_file_names () {
+    return grep(/^-/, keys %files);
+}
+
 
 sub unit_test () {
     $name_regexp = 'Music';
@@ -1098,9 +1117,9 @@ sub unit_test () {
         $verbose = $verbose_old;
     }
     
-    my @sizes = grep(!/^-/, keys %files);
+    my @sizes = get_file_sizes();
 
-    plan tests => 2 + 2 * scalar(@sizes) + 2 + 1 + 2;
+    plan tests => 2 + 2 * scalar(@sizes) + 2 + 1 + 2 + 2;
 
     my $nr_folders_exp = 3;
     
@@ -1156,20 +1175,30 @@ sub unit_test () {
     }
 
     my $filename = '/Volumes/Disk1/iTunes/iTunes Media/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a';
-    my $file = $files{"-$filename"};                                        
+    my $file = find_file($filename);
     my $filename_stripped = 'iTunes Media/Music/Scorpions/Tokyo tapes/09 Fly to the rainbow.m4a';
     
     ok( strip_directory($file) eq $filename_stripped, sprintf("strip origin of '%s' should be '$filename_stripped'", $file->filename()) );
 
     @origins = ();
     
-    my $origin_nr = lookup_or_add_origin('abc', '');
+    my ($origin_nr, $origin_nr_exp) = (lookup_or_add_origin('abc', ''), 1);
 
-    ok($origin_nr == 1, "first add ($origin_nr) should return 1");
+    ok($origin_nr == $origin_nr_exp, "first add(''abc', '') ($origin_nr) should return $origin_nr_exp");
 
     $origin_nr = lookup_or_add_origin('abc', '');
     
-    ok($origin_nr == 1, "next lookup ($origin_nr) should also return 1");
+    ok($origin_nr == $origin_nr_exp, "next lookup(''abc', '') ($origin_nr) should also return $origin_nr_exp");
+
+    $origin_nr_exp++;
+    
+    $origin_nr = lookup_or_add_origin('abc', 'xyz');
+
+    ok($origin_nr == $origin_nr_exp, "first add(''abc', 'xyz') ($origin_nr) should return $origin_nr_exp");
+
+    $origin_nr = lookup_or_add_origin('abc', 'xyz');
+    
+    ok($origin_nr == $origin_nr_exp, "next lookup(''abc', 'xyz') ($origin_nr) should also return $origin_nr_exp");
         
     done_testing();
 }
