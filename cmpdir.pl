@@ -260,6 +260,7 @@ use Getopt::Long;
 use Mac::iTunes::Library::XML;
 use POSIX qw(strftime);
 use Pod::Usage;
+use Try::Tiny;
 
 # for uri2file
 use Encode;
@@ -360,6 +361,7 @@ sub get_origin ($$);
 sub is_music_folder ($);
 sub strip_directory ($);
 sub find_file ($;$);
+sub check_file ($$$$);
 sub add_file ($);
 sub get_file_sizes ();
 sub get_file_names ();
@@ -422,9 +424,9 @@ sub process_command_line ()
                    my($arg) = @_;
 
                    if ($arg =~ m/^-/) {
-                       die "Usage error: unhandled option $arg detected in global option section";
+                       die "USAGE ERROR: unhandled option $arg detected in global option section";
                    } elsif ($arg !~ m/^(compare|merge|analyze|consolidate)$/) {
-                       die "Usage error: invalid subcommand $arg";
+                       die "USAGE ERROR: invalid subcommand $arg";
                    } else {
                        $subcmd = $arg;
                        die '!FINISH'; # stop processing arguments 
@@ -584,13 +586,18 @@ sub process_files ($) {
                 # ---
                 # check duplicates
                 # Three cases:
-                # 1) filename never processed
-                # 2) filename processed before but for a different origin (maybe from another compare file)
-                # 3) filename processed before but for the same different origin (maybe from another compare file)
+                # 1) Filename never processed.
+                #    See case 2.
+                # 2) Filename processed before but for a different origin (maybe from another compare file).
+                #    Store it in the origin and check ist has not been modified (size and mtime equal).
+                # 3) Filename processed before for the same different origin (maybe from another compare file).
+                #    
                 
-                $file = find_file($filename); # file found anywhere
+                $file = find_file($filename, $origin_nr); # file found anywhere
                 
                 if (!defined($file)) {
+                    # cases 1 and 2
+                    
                     my $hash;
                     
                     # take the hash of the predecessor if the files are equal
@@ -600,27 +607,33 @@ sub process_files ($) {
                         $hash = sprintf("%020d", scalar(keys %files)); # just a unique number converted to a string that is useful for string compares
                     }
 
-                    die "\$hash undefined"
+                    croak "ERROR: \$hash undefined"
                         unless defined($hash);
                     
                     $file = MyFile->new(filename => $filename, size => $size, mtime => $mtime, origin_nr => $origin_nr, hash => $hash);
 
-                    die "\$file->hash undefined"
+                    croak "ERROR: \$file->hash undefined"
                         unless defined($file->hash);
 
                     # GJP 2020-12-01 
                     # Do not store the filename in $files{$size} but create the object so it can be assigned to $prev_file below.
-                    
-                    if (!($filename =~ m/$name_regexp/o)) {
-                        warning("file", quote($filename), "does not match", $name_regexp);
-                    } else {
+
+                    try {
                         add_file($file);
-                    }
+                    } catch {
+                        if (m/^NAME ERROR: (.+)$/) {
+                            warning($1);
+                        }
+                        else {
+                            die $_;
+                        }
+                    };
                 } else {
+                    # case 3
+                    
                     # filename exists so it matches $name_regexp
 
-                    die "Size ($size) and/or modification time ($mtime) of \"$filename\" has changed. Original: " . $file->str()
-                        unless $file->size == $size && $file->mtime eq $mtime;
+                    check_file($file, $filename, $size, $mtime);
 
                     if ($equal) {
                         # This can not be the first processed output file since the file is already in the array.
@@ -729,7 +742,7 @@ sub consolidate ($) {
 }
 
 sub trim ($) {
-    die "trim(@_) should have one argument"
+    croak "ERROR: trim(@_) should have one argument"
         unless scalar(@_) == 1;
     
     my $str = shift @_;
@@ -783,7 +796,7 @@ sub process_directories_or_libraries ()
 
             $dir = File::Spec->canonpath(uri2file($library->musicFolder()));
 
-            die "Music directory \"$dir\" does not exist for iTunes XML library \"$xml_library\""
+            croak "ERROR: Music directory \"$dir\" does not exist for iTunes XML library \"$xml_library\""
                 unless -d $dir;
             
             info("dir", quote($dir));
@@ -829,13 +842,16 @@ sub process_directories_or_libraries ()
         foreach my $filename (@files) {
             my ($size, $mtime) = (stat($filename))[7, 9];
 
-            die sprintf("XML library %s should be newer than file %s: please update the XML library", quote($xml_library), quote($filename))
+            croak sprintf("ERROR: XML library %s should be newer than file %s: please update the XML library", quote($xml_library), quote($filename))
                 if (defined($xml_library_mtime) && $xml_library_mtime <= $mtime);
 
-            # check duplicates
-            if (!defined(find_file($filename, $origin_nr))) {
+            try {
                 add_file(MyFile->new(filename => $filename, size => $size, mtime => strftime('%Y-%m-%d %H:%M:%S', localtime($mtime)), origin_nr => $origin_nr));
-            }
+            } catch {
+                if (!m/^DUPLICATE ERROR: (.+)$/) {
+                    die $1;
+                }
+            };
         }
     }
 } # process_directories_or_libraries
@@ -1036,7 +1052,7 @@ sub lookup_or_add_origin ($$) {
 
     ++$found;
     
-    croak("found ($found) must be between 1 and " . scalar(@origins))
+    croak("ORIGIN ERROR: found ($found) must be between 1 and " . scalar(@origins))
         unless $found >= 1 && $found <= @origins;
 
     return $found;
@@ -1045,10 +1061,10 @@ sub lookup_or_add_origin ($$) {
 sub get_origin ($$) {
     my ($origin_nr, $idx) = @_;
 
-    croak("origin ($origin_nr) must be between 1 and " . scalar(@origins))
+    croak("ORIGIN ERROR: origin ($origin_nr) must be between 1 and " . scalar(@origins))
         unless $origin_nr >= 1 && $origin_nr <= @origins;
 
-    croak("index ($idx) must be 0 or 1")
+    croak("INDEX ERROR: index ($idx) must be 0 or 1")
         unless $idx == 0 || $idx == 1;
     
     return $origins[$origin_nr - 1]->[$idx];
@@ -1074,19 +1090,52 @@ sub find_file ($;$) {
     my ($filename, $origin_nr) = @_;
     my $key = (defined($origin_nr) ? "$origin_nr" : '') . '-' . $filename;
 
-    return exists($files{$key}) ? $files{$key} : undef;
+    return exists($files{$key}) ? ( defined($origin_nr) ? $files{$key} : ${files{$key}}[0] ) : undef;
+}
+
+sub check_file ($$$$) {
+    my ($file, $filename, $size, $mtime) = @_;
+                    
+    croak "MODIFICATION ERROR: Filename ($filename), size ($size) and/or modification time ($mtime) has changed. Original: " . $file->str()
+        unless $file->filename eq $filename && $file->size == $size && $file->mtime eq $mtime;
 }
 
 sub add_file ($) {
     my $file = shift @_;
-    
-    $files{$file->size} = []
-        unless exists $files{$file->size};
+    my $key;
 
-    $files{'-' . $file->filename} = $files{$file->origin_nr . '-' . $file->filename} = $file;
-                        
-    push(@{$files{$file->size}}, $file);
-                        
+    if (!($file->filename =~ m/$name_regexp/o)) {
+        croak sprintf("NAME ERROR: file %s does not match %s", quote($file->filename), $name_regexp);
+    }
+
+    croak sprintf("DUPLICATE ERROR: File (%s) already added for origin %d", $file->filename, $file->origin_nr)
+        unless (!defined(find_file($file->filename, $file->origin_nr)));
+
+    # Check that the file has not been changed if it has been added before.
+    $key = '-' . $file->filename;
+    
+    if (exists($files{$key})) {
+        my $first_file = ${files{$key}}[0];
+        
+        check_file($file, $first_file->filename, $first_file->size, $first_file->mtime);        
+    } else {
+        $files{$key} = [];
+    }
+
+    # add file to the array of files
+    push(@{$files{$key}}, $file);
+
+    $key = $file->size;
+    
+    $files{$key} = []
+        unless exists $files{$key};
+    
+    # add file to the array of files per size
+    push(@{$files{$key}}, $file);
+
+    # add file with origin
+    $files{$file->origin_nr . '-' . $file->filename} = $file;
+
     info("added file", quote($file->filename), 'with size', $file->size);
 }
 
