@@ -1081,7 +1081,10 @@ sub strip_directory ($) {
     my $dir = get_origin($file->origin_nr(), 0);
     my $filename = $file->filename();
     
-    $filename =~ s!^$dir(\/|\\)?!!;
+    my $changed = ($filename =~ s!^$dir(\/|\\)?!!);
+
+    croak "DIRECTORY ERROR: could not strip directory $dir from $filename"
+        unless defined($changed) && $changed == 1;
 
     return $filename;
 }
