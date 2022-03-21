@@ -268,7 +268,7 @@ use URI::Escape;
 
 use Test::More; # do not know how many in advance
 
-use lib &dirname($0); # to find File::Copy::Recursive in this directory
+use lib &dirname($0); # to find MyFile in this directory
 use MyFile;
 
 # VARIABLES
